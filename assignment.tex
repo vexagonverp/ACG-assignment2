@@ -1,0 +1,591 @@
+\documentclass[12pt]{extreport}
+\usepackage[utf8]{inputenc}
+
+% --- 1. FONTS & FORMATTING ---
+\usepackage{mathptmx}  % Times New Roman
+\usepackage[T1]{fontenc}
+\usepackage{scrextend}
+\changefontsizes{13pt}
+
+% --- 2. MARGINS ---
+\usepackage[left=2.5cm, top=2.0cm, right=1.5cm, bottom=2.5cm]{geometry}
+
+% --- 3. SPACING ---
+\usepackage{setspace}
+\onehalfspacing
+
+% --- 4. PACKAGES ---
+\usepackage{graphicx}
+\usepackage{titlesec}
+\usepackage{indentfirst}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{amsmath}
+
+% --- 5. HEADING FORMAT ---
+\titleformat{\chapter}[display]
+  {\normalfont\bfseries\centering}
+  {\MakeUppercase{\chaptertitlename}\ \thechapter}
+  {0pt}
+  {\MakeUppercase}
+\titlespacing*{\chapter}{0pt}{-20pt}{24pt}
+
+% --- 6. CODE LISTING STYLE ---
+\lstdefinestyle{tsstyle}{
+    language=Java, % closest built-in; we add TS keywords below
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray}\itshape,
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=8pt,
+    frame=single,
+    breaklines=true,
+    tabsize=2,
+    showstringspaces=false,
+    captionpos=b,
+    morekeywords={const,let,function,export,interface,import,from,type,number,boolean,string,null,undefined,as,of}
+}
+
+\begin{document}
+
+% --- TITLE PAGE ---
+\begin{titlepage}
+    \centering
+    \vspace*{1cm}
+    \textbf{VIETNAM NATIONAL UNIVERSITY -- HO CHI MINH CITY}\\
+    \textbf{INTERNATIONAL UNIVERSITY}\\
+    \textbf{SCHOOL OF COMPUTER SCIENCE AND ENGINEERING}
+
+    \vspace{3cm}
+    \textbf{ADVANCED COMPUTER GRAPHIC}\\
+    \textbf{ASSIGNMENT 2}
+
+    \vspace{4cm}
+    \textbf{ASSIGNMENT REPORT}
+
+    \vspace{3cm}
+    \begin{flushleft}
+    \hspace{4cm} Student: Tran Bao Thanh, MITIU25214 \\
+    \end{flushleft}
+
+    \vfill
+    March 2026
+\end{titlepage}
+
+% --- TABLE OF CONTENTS ---
+\pagenumbering{roman}
+\setcounter{page}{2}
+\tableofcontents
+\newpage
+
+% ===========================================================================
+\pagenumbering{arabic}
+\chapter{FILLING HOLES ON THE 2D SURFACE OF A POINT CLOUD}
+% ===========================================================================
+
+When we have a 2D point cloud with gaps or sparse regions, we need a way to fill those holes with a good quality triangle mesh. The approach we took is to first build a Delaunay triangulation of the point cloud using the Bowyer-Watson algorithm, then identify triangles that are too large or too thin (these are the ones covering the holes and sparse areas), and finally use Ruppert's refinement algorithm to insert new points into those bad triangles until the mesh is filled in properly.
+
+We built a web application to demonstrate this process using Vue 3 (Composition API) and Vite. The core algorithms are Bowyer-Watson, circumcircle computation, and Ruppert's refinement which we wrote from scratch in TypeScript. The convex hull uses the \texttt{d3-polygon} library since that is not part of the main algorithms.
+
+The application lets you generate a random 2D point cloud then it triangulates the points and highlights where the holes and bad triangles are. You can then refine the mesh step by step or all at once and watch the holes get filled in with new points and better triangles.
+
+\section{Project Structure}
+
+\begin{verbatim}
+src/
+    geometry.ts       -- Types + math primitives (circumcircle, area, angle)
+    triangulation.ts  -- Bowyer-Watson algorithm
+    refinement.ts     -- Ruppert's refinement
+    hull.ts           -- Convex hull (d3-polygon wrapper)
+    App.vue           -- State, UI, rendering
+\end{verbatim}
+
+\section{Data Types}
+
+We defined these types in \texttt{geometry.ts} and they are shared across all the other files:
+
+\begin{lstlisting}[style=tsstyle, caption={Shared types (\texttt{geometry.ts})}]
+interface Point {
+  x: number
+  y: number
+  __super?: boolean  // marks super-triangle vertices
+}
+
+interface Circle {
+  x: number
+  y: number
+  r: number
+}
+
+interface TriangleInfo {
+  p1: Point; p2: Point; p3: Point
+  area: number
+  angle: number        // smallest interior angle (degrees)
+  cc: Circle | null    // circumscribed circle (null if degenerate)
+  bigArea: boolean     // area exceeds threshold
+  smallAngle: boolean  // min angle below threshold
+  bad: boolean         // needs refinement (bigArea OR smallAngle)
+}
+\end{lstlisting}
+
+We also have some small utility functions that get used everywhere:
+
+\begin{lstlisting}[style=tsstyle, caption={Utility functions (\texttt{geometry.ts})}]
+const EPSILON = 1e-10  // tolerance for float comparisons
+
+// prevent NaN/Infinity from crashing SVG rendering
+function safe(v: number): number {
+  return isFinite(v) ? v : 0
+}
+
+// needed before passing to Math.acos
+function clamp(value: number): number {
+  return Math.max(-1, Math.min(1, value))
+}
+
+function distanceSq(a: Point, b: Point): number {
+  return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
+}
+
+function distance(a: Point, b: Point): number {
+  return Math.sqrt(distanceSq(a, b))
+}
+
+function midpoint(a: Point, b: Point): Point {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+}
+\end{lstlisting}
+
+\section{Core Algorithm: Bowyer-Watson}
+
+Bowyer-Watson is an incremental algorithm where each point in the point set is inserted one at a time into an existing triangulation. What the algorithm does is it checks after every insertion whether any of the existing triangles have their circumcircle violated by the new point. If a point lands inside the circumcircle of a triangle then that triangle is no longer valid under the Delaunay condition and it has to be removed. The algorithm then takes the hole that is left behind and fills it by connecting the edges of the hole back to the newly inserted point.
+
+\begin{enumerate}
+    \item First we need a starting triangulation so we create a very large ``super-triangle'' that is big enough to contain every single point in our input set inside of it.
+    \item Then for each point we want to insert:
+    \begin{enumerate}
+        \item Go through all the triangles and check which ones have a circumcircle that contains this new point, those are the ones that break the Delaunay rule.
+        \item Delete all of those bad triangles. This leaves a polygon shaped hole in the mesh.
+        \item Look at the edges of the deleted triangles and figure out which edges are on the boundary of the hole. An edge is on the boundary if it only belonged to one deleted triangle. If two deleted triangles shared an edge then that edge is on the inside of the hole not the boundary.
+        \item Take each boundary edge and make a new triangle by connecting it to the new point.
+    \end{enumerate}
+    \item After all the points are in, we go back and delete any triangle that still has one of the super-triangle's vertices. Those were just temporary scaffolding to get the algorithm started.
+\end{enumerate}
+
+The full implementation is in \texttt{triangulation.ts}. First the helper functions for edge detection:
+
+\begin{lstlisting}[style=tsstyle, caption={Edge helpers (\texttt{triangulation.ts})}]
+interface Triangle {
+  p: [Point, Point, Point]
+}
+
+// check if two edges are the same (works in either direction)
+function edgesMatch(e1: [Point, Point], e2: [Point, Point]): boolean {
+  return (e1[0] === e2[1] && e1[1] === e2[0])
+      || (e1[0] === e2[0] && e1[1] === e2[1])
+}
+
+// get all 3 edges of a triangle
+function triangleEdges(tri: Triangle): [Point, Point][] {
+  return [
+    [tri.p[0], tri.p[1]],
+    [tri.p[1], tri.p[2]],
+    [tri.p[2], tri.p[0]]
+  ]
+}
+
+// is this edge shared with another triangle in the list?
+function isSharedEdge(
+  edge: [Point, Point], ownerTri: Triangle, allTris: Triangle[]
+): boolean {
+  return allTris.some(other => {
+    if (other === ownerTri) return false
+    return triangleEdges(other).some(
+      otherEdge => edgesMatch(edge, otherEdge)
+    )
+  })
+}
+
+// find boundary edges of the hole left by removing triangles
+function findBoundaryEdges(
+  removedTriangles: Triangle[]
+): [Point, Point][] {
+  const boundary: [Point, Point][] = []
+  for (const tri of removedTriangles) {
+    for (const edge of triangleEdges(tri)) {
+      if (!isSharedEdge(edge, tri, removedTriangles)) {
+        boundary.push(edge)
+      }
+    }
+  }
+  return boundary
+}
+\end{lstlisting}
+
+The circumcircle containment test that Bowyer-Watson uses to decide which triangles to remove:
+
+\begin{lstlisting}[style=tsstyle, caption={Circumcircle containment test (\texttt{triangulation.ts})}]
+function isInsideCircumcircle(point: Point, tri: Triangle): boolean {
+  const cc = circumcircle(tri.p[0], tri.p[1], tri.p[2])
+  if (!cc) return false
+
+  const distToCenter = (point.x - cc.x) ** 2 + (point.y - cc.y) ** 2
+  const radiusSq = cc.r ** 2
+  return distToCenter <= radiusSq + EPSILON
+}
+\end{lstlisting}
+
+And the main Bowyer-Watson function that puts it all together:
+
+\begin{lstlisting}[style=tsstyle, caption={Bowyer-Watson algorithm (\texttt{triangulation.ts})}]
+function bowyerWatson(points: Point[]): Triangle[] {
+  if (points.length < 3) return []
+
+  // Step 1: super-triangle that contains all points
+  const minX = Math.min(...points.map(p => p.x)) - 100
+  const maxX = Math.max(...points.map(p => p.x)) + 100
+  const minY = Math.min(...points.map(p => p.y)) - 100
+  const maxY = Math.max(...points.map(p => p.y)) + 100
+  const padding = Math.max(maxX - minX, maxY - minY) * 2
+
+  const superA: Point = { x: minX - padding, y: minY - 1, __super: true }
+  const superB: Point = { x: minX + padding, y: minY - 1, __super: true }
+  const superC: Point = {
+    x: (minX + maxX) / 2, y: maxY + padding, __super: true
+  }
+
+  let triangles: Triangle[] = [{ p: [superA, superB, superC] }]
+
+  // Step 2: insert each point
+  for (const point of points) {
+    const invalidated: Triangle[] = []
+    const kept: Triangle[] = []
+
+    for (const tri of triangles) {
+      if (isInsideCircumcircle(point, tri)) {
+        invalidated.push(tri)
+      } else {
+        kept.push(tri)
+      }
+    }
+
+    const boundary = findBoundaryEdges(invalidated)
+
+    triangles = kept
+    for (const [edgeA, edgeB] of boundary) {
+      triangles.push({ p: [edgeA, edgeB, point] })
+    }
+  }
+
+  // Step 3: remove super-triangle scaffolding
+  return triangles.filter(tri => !tri.p.some(p => p.__super))
+}
+\end{lstlisting}
+
+\subsection{Circumcircle Computation}
+
+If you have three points that are not all sitting on the same line then there is always going to be exactly one circle you can draw that goes through all three of them. That circle is what we call the circumcircle. The center of it is the circumcenter and you can find it by drawing the perpendicular bisector of two of the triangle's edges and seeing where they cross each other. That crossing point is the circumcenter. We implemented this in \texttt{geometry.ts} using line equation helpers:
+
+\begin{lstlisting}[style=tsstyle, caption={Line geometry helpers (\texttt{geometry.ts})}]
+interface Line { a: number; b: number; c: number }
+
+// derive line equation ax + by = c from two points
+function lineFromPoints(p1: Point, p2: Point): Line {
+  const a = p2.y - p1.y
+  const b = p1.x - p2.x
+  const c = a * p1.x + b * p1.y
+  return { a, b, c }
+}
+
+// rotate line 90 deg and force through midpoint
+function perpendicularBisector(line: Line, mid: Point): Line {
+  const a = -line.b        // swap and negate one
+  const b = line.a
+  const c = a * mid.x + b * mid.y  // plug in midpoint
+  return { a, b, c }
+}
+
+// Cramer's rule: solve two lines for intersection
+function lineIntersection(l1: Line, l2: Line): Point | null {
+  const det = l1.a * l2.b - l2.a * l1.b
+  if (Math.abs(det) < EPSILON) return null // parallel = collinear
+
+  const x = (l2.b * l1.c - l1.b * l2.c) / det
+  const y = (l1.a * l2.c - l2.a * l1.c) / det
+  if (!isFinite(x) || !isFinite(y)) return null
+  return { x, y }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[style=tsstyle, caption={Circumcircle computation (\texttt{geometry.ts})}]
+function circumcircle(p1: Point, p2: Point, p3: Point): Circle | null {
+  // Step 1: line equations for two edges
+  const lineAB = lineFromPoints(p1, p2)
+  const lineBC = lineFromPoints(p2, p3)
+
+  // Step 2: perpendicular bisectors through each midpoint
+  const midAB = midpoint(p1, p2)
+  const midBC = midpoint(p2, p3)
+  const bisectorAB = perpendicularBisector(lineAB, midAB)
+  const bisectorBC = perpendicularBisector(lineBC, midBC)
+
+  // Step 3: circumcenter = where the bisectors cross
+  const center = lineIntersection(bisectorAB, bisectorBC)
+  if (!center) return null // collinear points, no circle
+
+  // Step 4: radius = distance from center to any vertex
+  const radius = distance(center, p1)
+  if (!isFinite(radius)) return null
+
+  return { x: center.x, y: center.y, r: radius }
+}
+\end{lstlisting}
+
+\subsection{Point-in-Triangle Test}
+
+We need this test in a couple of places, both in the refinement to check if the circumcenter falls inside the triangle and also for the click interaction in the UI. It works by computing the cross product at each edge and checking if they all have the same sign:
+
+\begin{lstlisting}[style=tsstyle, caption={Point-in-triangle test (\texttt{geometry.ts})}]
+function pointInTriangle(
+  px: number, py: number, p1: Point, p2: Point, p3: Point
+): boolean {
+  const cross1 = (px - p2.x) * (p1.y - p2.y)
+               - (p1.x - p2.x) * (py - p2.y)
+  const cross2 = (px - p3.x) * (p2.y - p3.y)
+               - (p2.x - p3.x) * (py - p3.y)
+  const cross3 = (px - p1.x) * (p3.y - p1.y)
+               - (p3.x - p1.x) * (py - p1.y)
+
+  const hasNegative = (cross1 < -EPSILON)
+                   || (cross2 < -EPSILON)
+                   || (cross3 < -EPSILON)
+  const hasPositive = (cross1 > EPSILON)
+                   || (cross2 > EPSILON)
+                   || (cross3 > EPSILON)
+
+  // inside only if all cross products have the same sign
+  return !(hasNegative && hasPositive)
+}
+\end{lstlisting}
+
+\section{Triangle Quality Metrics}
+
+Not every triangle that comes out of the Delaunay triangulation is going to look good. Some of them end up really large and some end up really thin and pointy. We need a way to flag these so we know which ones to fix. A triangle gets flagged as ``bad'' if its area is too large (default threshold 8000, adjustable with a slider) or if its smallest angle is too small (default 20\textdegree, also adjustable). The code for both checks:
+
+\begin{lstlisting}[style=tsstyle, caption={Triangle area via cross product (\texttt{geometry.ts})}]
+function triangleArea(p1: Point, p2: Point, p3: Point): number {
+  const abX = p2.x - p1.x
+  const abY = p2.y - p1.y
+  const acX = p3.x - p1.x
+  const acY = p3.y - p1.y
+
+  const crossProduct = abX * acY - acX * abY
+  const area = Math.abs(crossProduct) / 2
+  return isFinite(area) ? area : 0
+}
+\end{lstlisting}
+
+\begin{lstlisting}[style=tsstyle, caption={Minimum angle via law of cosines (\texttt{geometry.ts})}]
+function minAngle(p1: Point, p2: Point, p3: Point): number {
+  const sideA = distance(p2, p3)  // opposite p1
+  const sideB = distance(p1, p3)  // opposite p2
+  const sideC = distance(p1, p2)  // opposite p3
+
+  if (sideA < EPSILON || sideB < EPSILON || sideC < EPSILON) return 0
+
+  const aSq = sideA ** 2, bSq = sideB ** 2, cSq = sideC ** 2
+
+  // law of cosines: angle = acos((b^2 + c^2 - a^2) / 2bc)
+  const angleAtP1 = Math.acos(clamp(
+    (bSq + cSq - aSq) / (2 * sideB * sideC)))
+  const angleAtP2 = Math.acos(clamp(
+    (aSq + cSq - bSq) / (2 * sideA * sideC)))
+  const angleAtP3 = Math.acos(clamp(
+    (aSq + bSq - cSq) / (2 * sideA * sideB)))
+
+  const minRadians = Math.min(angleAtP1, angleAtP2, angleAtP3)
+  return minRadians * (180 / Math.PI)  // convert to degrees
+}
+\end{lstlisting}
+
+\section{Ruppert's Refinement Algorithm}
+
+So now we know which triangles are bad and we need to fix them. This is where Ruppert's refinement comes in. The idea is pretty straightforward, you pick a bad triangle, you find a good spot inside it to put a new point, you add that point to the point set, and then you re-run Bowyer-Watson so the whole mesh gets re-triangulated with the new point included. The full implementation is in \texttt{refinement.ts}:
+
+\begin{lstlisting}[style=tsstyle, caption={Helper functions for insertion point selection (\texttt{refinement.ts})}]
+const MAX_INSERTIONS_PER_STEP = 12  // cap per step
+const MIN_DISTANCE_SQ = 100         // 10px squared
+
+// midpoint of the longest of the 3 edges
+function longestEdgeMidpoint(
+  p1: Point, p2: Point, p3: Point
+): Point {
+  const edges: [Point, Point][] = [[p1, p2], [p2, p3], [p1, p3]]
+  let longestEdge = edges[0]
+  let longestLenSq = 0
+
+  for (const [a, b] of edges) {
+    const lenSq = (a.x - b.x) ** 2 + (a.y - b.y) ** 2
+    if (lenSq > longestLenSq) {
+      longestLenSq = lenSq
+      longestEdge = [a, b]
+    }
+  }
+  return {
+    x: (longestEdge[0].x + longestEdge[1].x) / 2,
+    y: (longestEdge[0].y + longestEdge[1].y) / 2
+  }
+}
+
+// average of the 3 vertex positions
+function centroid(p1: Point, p2: Point, p3: Point): Point {
+  return {
+    x: (p1.x + p2.x + p3.x) / 3,
+    y: (p1.y + p2.y + p3.y) / 3
+  }
+}
+
+// is this point too close to any existing point?
+function isTooClose(
+  candidate: Point, existingPoints: Point[]
+): boolean {
+  return existingPoints.some(
+    p => (p.x - candidate.x) ** 2
+       + (p.y - candidate.y) ** 2 < MIN_DISTANCE_SQ
+  )
+}
+\end{lstlisting}
+
+\begin{lstlisting}[style=tsstyle, caption={Insertion point selection: circumcenter then fallbacks (\texttt{refinement.ts})}]
+function pickInsertionPoint(tri: TriangleInfo): Point | null {
+  const { p1, p2, p3, cc } = tri
+
+  if (cc) {
+    // try circumcenter first (best for angle improvement)
+    const circumcenter = { x: cc.x, y: cc.y }
+    if (pointInTriangle(circumcenter.x, circumcenter.y, p1, p2, p3)) {
+      return circumcenter
+    }
+    // circumcenter outside triangle -> midpoint of longest edge
+    return longestEdgeMidpoint(p1, p2, p3)
+  }
+
+  // circumcircle failed (degenerate) -> centroid
+  return centroid(p1, p2, p3)
+}
+\end{lstlisting}
+
+\begin{lstlisting}[style=tsstyle, caption={One refinement pass (\texttt{refinement.ts})}]
+function refineOnce(
+  triangleData: TriangleInfo[],
+  allPoints: Point[],
+  hull: Point[]
+): Point[] {
+  // sort bad triangles by area descending (worst first)
+  const badTriangles = triangleData
+    .filter(t => t.bad)
+    .sort((a, b) => b.area - a.area)
+
+  if (badTriangles.length === 0) return []
+
+  const newPoints: Point[] = []
+
+  for (const tri of badTriangles) {
+    if (newPoints.length >= MAX_INSERTIONS_PER_STEP) break
+
+    const candidate = pickInsertionPoint(tri)
+    if (!candidate || !isFinite(candidate.x)
+                   || !isFinite(candidate.y)) continue
+
+    // must be inside original point cloud boundary
+    if (!pointInConvexHull(candidate, hull)) continue
+
+    // must not be too close to existing points
+    if (isTooClose(candidate, [...allPoints, ...newPoints]))
+      continue
+
+    newPoints.push(candidate)
+  }
+  return newPoints
+}
+\end{lstlisting}
+
+After the new points have been inserted into the point set, the Bowyer-Watson algorithm is run again from scratch on the entire point set to produce a new Delaunay triangulation that incorporates the newly added points. This is because inserting points changes the topology of the mesh so the triangulation needs to be recomputed. The ``Refine All'' button in the interface repeats this refinement process multiple times until either there are no more bad triangles left in the mesh, or until the algorithm cannot insert any more points due to the distance and boundary constraints.
+
+\section{Convex Hull}
+
+We use \texttt{d3-polygon} for the convex hull since it is not part of the algorithms we are studying. The hull is used to prevent the refinement from adding points outside the original point cloud boundary. The wrapper is in \texttt{hull.ts}:
+
+\begin{lstlisting}[style=tsstyle, caption={Convex hull wrapper (\texttt{hull.ts})}]
+import { polygonHull, polygonContains } from 'd3-polygon'
+
+function convexHull(points: Point[]): Point[] {
+  const coords: [number, number][] = points.map(p => [p.x, p.y])
+  const hull = polygonHull(coords)
+  if (!hull) return points.slice(0, 3)
+  return hull.map(([x, y]) => ({ x, y }))
+}
+
+function pointInConvexHull(point: Point, hull: Point[]): boolean {
+  if (hull.length < 3) return true
+  const polygon: [number, number][] = hull.map(p => [p.x, p.y])
+  return polygonContains(polygon, [point.x, point.y])
+}
+\end{lstlisting}
+
+\section{User Interface}
+
+For the front-end visualization, the application renders all of the geometry inside a single SVG element with a viewBox of 700$\times$600 pixels. The user interacts with the application through the following controls that are placed above the SVG canvas:
+
+\begin{itemize}
+    \item \textbf{Random} --- generate 28 random points and triangulate.
+    \item \textbf{Refine Step} --- run one refinement pass.
+    \item \textbf{Refine All} --- refine until no bad triangles remain.
+    \item \textbf{Reset} --- remove all refinement-added points.
+    \item \textbf{Circumcircles} --- toggle circumcircle overlay (dashed circles).
+    \item \textbf{Max Area / Min Angle sliders} --- adjust quality thresholds.
+    \item \textbf{Click on canvas} --- add a point manually.
+    \item \textbf{Click on triangle} --- select it and view its stats.
+\end{itemize}
+
+We use color to communicate triangle quality to the user. Each triangle in the SVG canvas is filled with a color that corresponds to whether it passed or failed the quality thresholds, the reason we chose to do it this way is because it makes it immediately obvious where the problem areas are in the mesh without having to click on individual triangles. The color scheme is as follows:
+\begin{itemize}
+    \item \textbf{Green} --- good (passes both thresholds)
+    \item \textbf{Orange} --- area too large
+    \item \textbf{Yellow} --- minimum angle too small
+    \item \textbf{Red} --- both problems
+    \item \textbf{Purple} --- currently selected
+\end{itemize}
+
+For the points we also use color to differentiate between the original random points and the ones that were inserted during refinement. The original points show up as dark circles and the refinement-inserted points show up as purple circles. We thought this distinction was important because it lets you see how much work the refinement algorithm actually did compared to the starting point set. There is also a statistics bar that we placed at the bottom of the page, it shows some numbers like total points, how many were added, triangle count, bad triangle count, and what the average minimum angle is across the whole mesh.
+
+\section{Results}
+
+To test the application we generated a set of 28 random points scattered across the canvas. The initial Delaunay triangulation of these points contained a large number of bad triangles which are shown in orange and yellow colors in Figure \ref{fig:web_before}. After clicking the ``Refine All'' button, the refinement algorithm ran multiple passes and inserted additional points into the mesh until all the triangles in the triangulation passed both the area and minimum angle quality thresholds. The result after refinement is shown in Figure \ref{fig:web_after} where most of the triangles are green indicating they are within acceptable quality. Figure \ref{fig:web_circumcircles} shows the circumcircle overlay where the dashed blue circles represent each triangle's circumcircle and we can verify that no point falls inside another triangle's circumcircle which confirms the Delaunay property is maintained.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{web_before_refine.png}
+    \caption{Initial Delaunay triangulation of 28 random points. Orange and yellow triangles are ``bad'' (too large or too skinny).}
+    \label{fig:web_before}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{web_after_refine.png}
+    \caption{After refinement. Purple dots are inserted points. Most triangles are now green (pass both quality thresholds).}
+    \label{fig:web_after}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{web_circumcircles.png}
+    \caption{Circumcircle overlay enabled. Dashed blue circles show each triangle's circumscribed circle. No point falls inside another triangle's circumcircle, confirming the Delaunay property.}
+    \label{fig:web_circumcircles}
+\end{figure}
+
+\end{document}
