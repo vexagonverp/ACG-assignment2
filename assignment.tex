@@ -87,11 +87,11 @@
 \chapter{FILLING HOLES ON THE 2D SURFACE OF A POINT CLOUD}
 % ===========================================================================
 
-When we have a 2D point cloud with gaps or sparse regions, we need a way to fill those holes with a good quality triangle mesh. The approach we took is to first build a Delaunay triangulation of the point cloud using the Bowyer-Watson algorithm, then identify triangles that are too large or too thin, these are the ones covering the holes and sparse areas, and then use Ruppert's refinement algorithm to insert new points into those bad triangles until the mesh is filled in properly.
+When we have a 2D point cloud with gaps or sparse regions and we need a way to fill those holes with a good quality triangle mesh. The approach we took is to first build a Delaunay triangulation of the point cloud using the Bowyer-Watson algorithm then identify triangles that are too large or too thin, these are the ones covering the holes and sparse areas and use Ruppert's refinement algorithm to insert new points into those bad triangles until the mesh is filled in properly.
 
 We built a web application to demonstrate this process using Vue 3 (Composition API) and Vite. The core algorithms which are Bowyer-Watson, circumcircle computation, and Ruppert's refinement we wrote from scratch in TypeScript. The convex hull uses the \texttt{d3-polygon} library since that is not part of the main algorithms we are studying in this assignment.
 
-The application lets us generate a random 2D point cloud, then it triangulates the points and highlights where the holes and bad triangles are. We can then refine the mesh step by step or all at once and watch as the holes get filled in with new points and better shaped triangles.
+The application lets us generate a random 2D point cloud then it triangulates the points and highlights where the holes and bad triangles are. We can then refine the mesh step by step or all at once and watch as the holes get filled in with new points and better shaped triangles.
 
 \section{Project Structure}
 
@@ -288,7 +288,7 @@ function bowyerWatson(points: Point[]): Triangle[] {
 
 \subsection{Circumcircle Computation}
 
-If we have three points that are not all sitting on the same line then there is always going to be exactly one circle we can draw that passes through all three of them, that circle is what we call the circumcircle. The center of it is the circumcenter. We can find the circumcenter by drawing the perpendicular bisector of two of the triangle's edges and seeing where they cross each other, the crossing point is the circumcenter. We implemented this in \texttt{geometry.ts} using line equation helpers:
+If we have three points that are not all sitting on the same line then there is always going to be exactly one circle we can draw that passes through all three of them, that circle is what we call the circumcircle and the center of it is the circumcenter. We can find the circumcenter by drawing the perpendicular bisector of two of the triangle's edges and seeing where they cross each other, the crossing point is the circumcenter. We implemented this in \texttt{geometry.ts} using line equation helpers:
 
 \begin{lstlisting}[style=tsstyle, caption={Line geometry helpers (\texttt{geometry.ts})}]
 interface Line { a: number; b: number; c: number }
@@ -374,7 +374,7 @@ function pointInTriangle(
 
 \section{Triangle Quality Metrics}
 
-Not every triangle that comes out of the Delaunay triangulation is going to look good. Some of them end up really large, some end up really thin and pointy. We need a way to flag these so we know which ones need to be fixed. A triangle gets flagged as ``bad'' if its area is too large, the default threshold we set is 8000 but the user can adjust it with a slider, or if its smallest angle is too small which defaults to 20\textdegree and is also adjustable. The code for both checks:
+Not every triangle that comes out of the Delaunay triangulation is going to look good. As a matter of fact, some will end up really large, some end up really thin and pointy and we need a way to flag these so we know which ones need to be fixed. A triangle gets flagged as ``bad'' if its area is too large, the default threshold we set is 8000 but the user can adjust it with a slider, or if its smallest angle is too small which defaults to 20\textdegree and is also adjustable. The code for both checks:
 
 \begin{lstlisting}[style=tsstyle, caption={Triangle area via cross product (\texttt{geometry.ts})}]
 function triangleArea(p1: Point, p2: Point, p3: Point): number {
@@ -414,7 +414,7 @@ function minAngle(p1: Point, p2: Point, p3: Point): number {
 
 \section{Ruppert's Refinement Algorithm}
 
-So now we know which triangles are bad and we need to fix them, this is where Ruppert's refinement comes in. The idea is we pick a bad triangle, find a good spot inside it to put a new point, add that point to the point set, and then re-run Bowyer-Watson so the whole mesh gets re-triangulated with the new point included. The full implementation is in \texttt{refinement.ts}:
+At this stage we know which triangles are not up to par with our definition of good triangle and we need to refine them, this is where Ruppert's refinement comes in. The idea is we pick a bad triangle, find a good spot inside it to put a new point and add that point to the point set then re-run Bowyer-Watson so the whole mesh gets re-triangulated with the new point included. The full implementation is in \texttt{refinement.ts}:
 
 \begin{lstlisting}[style=tsstyle, caption={Helper functions for insertion point selection (\texttt{refinement.ts})}]
 const MAX_INSERTIONS_PER_STEP = 12  // cap per step
@@ -514,7 +514,7 @@ function refineOnce(
 }
 \end{lstlisting}
 
-After the new points have been inserted into the point set, the Bowyer-Watson algorithm is run again from scratch on the entire point set to produce a new Delaunay triangulation that incorporates the newly added points. We have to do this because inserting points changes the topology of the mesh so the triangulation needs to be recomputed from the beginning. The ``Refine All'' button in the interface repeats this refinement process multiple times until either there are no more bad triangles left in the mesh, or the algorithm cannot insert any more points because of the distance and boundary constraints.
+After the new points have been inserted into the point set, the Bowyer-Watson algorithm is run again on the entire point set to produce a new Delaunay triangulation that incorporates the newly added points. We have to do this because inserting points changes the topology of the mesh so the triangulation needs to be recomputed from the beginning. The ``Refine All'' button in the interface repeats this refinement process multiple times until either there are no more bad triangles left in the mesh, or the algorithm cannot insert any more points because of the distance and boundary constraints.
 
 \section{Convex Hull}
 
@@ -552,7 +552,7 @@ For the front end visualization, the application renders all of the geometry ins
     \item \textbf{Click on triangle} --- select it and view its stats.
 \end{itemize}
 
-We use color to communicate triangle quality to the user. Each triangle in the SVG canvas is filled with a color that corresponds to whether it passed or failed the quality thresholds. We chose to do it this way because it makes it immediately obvious where the problem areas are in the mesh without having to click on individual triangles:
+We use color to communicate triangle quality to the user each triangle in the SVG canvas is filled with a color that corresponds to whether it passed or failed the quality thresholds. This visualization helps makes it immediately obvious where the problem areas are in the mesh without having to click on individual triangles:
 \begin{itemize}
     \item \textbf{Green} --- good (passes both thresholds)
     \item \textbf{Orange} --- area too large
