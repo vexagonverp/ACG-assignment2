@@ -91,7 +91,7 @@ When we have a 2D point cloud with gaps or sparse regions, we need a way to fill
 
 We built a web application to demonstrate this process using Vue 3 (Composition API) and Vite. The core algorithms which are Bowyer-Watson, circumcircle computation, and Ruppert's refinement we wrote from scratch in TypeScript. The convex hull uses the \texttt{d3-polygon} library since that is not part of the main algorithms we are studying in this assignment.
 
-The application lets you generate a random 2D point cloud, then it triangulates the points and highlights where the holes and bad triangles are. You can then refine the mesh step by step or all at once and watch as the holes get filled in with new points and better shaped triangles.
+The application lets us generate a random 2D point cloud, then it triangulates the points and highlights where the holes and bad triangles are. We can then refine the mesh step by step or all at once and watch as the holes get filled in with new points and better shaped triangles.
 
 \section{Project Structure}
 
@@ -288,7 +288,7 @@ function bowyerWatson(points: Point[]): Triangle[] {
 
 \subsection{Circumcircle Computation}
 
-If you have three points that are not all sitting on the same line then there is always going to be exactly one circle you can draw that passes through all three of them, that circle is what we call the circumcircle. The center of it is the circumcenter. You can find the circumcenter by drawing the perpendicular bisector of two of the triangle's edges and seeing where they cross each other, the crossing point is the circumcenter. We implemented this in \texttt{geometry.ts} using line equation helpers:
+If we have three points that are not all sitting on the same line then there is always going to be exactly one circle we can draw that passes through all three of them, that circle is what we call the circumcircle. The center of it is the circumcenter. We can find the circumcenter by drawing the perpendicular bisector of two of the triangle's edges and seeing where they cross each other, the crossing point is the circumcenter. We implemented this in \texttt{geometry.ts} using line equation helpers:
 
 \begin{lstlisting}[style=tsstyle, caption={Line geometry helpers (\texttt{geometry.ts})}]
 interface Line { a: number; b: number; c: number }
@@ -414,7 +414,7 @@ function minAngle(p1: Point, p2: Point, p3: Point): number {
 
 \section{Ruppert's Refinement Algorithm}
 
-So now we know which triangles are bad and we need to fix them, this is where Ruppert's refinement comes in. The idea is you pick a bad triangle, find a good spot inside it to put a new point, add that point to the point set, and then re-run Bowyer-Watson so the whole mesh gets re-triangulated with the new point included. The full implementation is in \texttt{refinement.ts}:
+So now we know which triangles are bad and we need to fix them, this is where Ruppert's refinement comes in. The idea is we pick a bad triangle, find a good spot inside it to put a new point, add that point to the point set, and then re-run Bowyer-Watson so the whole mesh gets re-triangulated with the new point included. The full implementation is in \texttt{refinement.ts}:
 
 \begin{lstlisting}[style=tsstyle, caption={Helper functions for insertion point selection (\texttt{refinement.ts})}]
 const MAX_INSERTIONS_PER_STEP = 12  // cap per step
@@ -561,7 +561,7 @@ We use color to communicate triangle quality to the user. Each triangle in the S
     \item \textbf{Purple} --- currently selected
 \end{itemize}
 
-For the points we also use color to differentiate between the original random points and the ones that were inserted during refinement. The original points show up as dark circles and the refinement inserted points show up as purple circles. We thought this distinction was important because it lets you see how much work the refinement algorithm actually did compared to the starting point set. There is also a statistics bar at the bottom of the page that shows total points, how many were added by refinement, triangle count, bad triangle count, and the average minimum angle across the whole mesh.
+For the points we also use color to differentiate between the original random points and the ones that were inserted during refinement. The original points show up as dark circles and the refinement inserted points show up as purple circles. We thought this distinction was important because it lets us see how much work the refinement algorithm actually did compared to the starting point set. There is also a statistics bar at the bottom of the page that shows total points, how many were added by refinement, triangle count, bad triangle count, and the average minimum angle across the whole mesh.
 
 \section{Results}
 
