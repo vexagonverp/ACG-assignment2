@@ -87,11 +87,11 @@
 \chapter{FILLING HOLES ON THE 2D SURFACE OF A POINT CLOUD}
 % ===========================================================================
 
-When we have a 2D point cloud with gaps or sparse regions, we need a way to fill those holes with a good quality triangle mesh. The approach we took is to first build a Delaunay triangulation of the point cloud using the Bowyer-Watson algorithm, then identify triangles that are too large or too thin (these are the ones covering the holes and sparse areas), and finally use Ruppert's refinement algorithm to insert new points into those bad triangles until the mesh is filled in properly.
+When we have a 2D point cloud with gaps or sparse regions, we need a way to fill those holes with a good quality triangle mesh. The approach we took is to first build a Delaunay triangulation of the point cloud using the Bowyer-Watson algorithm, then identify triangles that are too large or too thin, these are the ones covering the holes and sparse areas, and then use Ruppert's refinement algorithm to insert new points into those bad triangles until the mesh is filled in properly.
 
-We built a web application to demonstrate this process using Vue 3 (Composition API) and Vite. The core algorithms are Bowyer-Watson, circumcircle computation, and Ruppert's refinement which we wrote from scratch in TypeScript. The convex hull uses the \texttt{d3-polygon} library since that is not part of the main algorithms.
+We built a web application to demonstrate this process using Vue 3 (Composition API) and Vite. The core algorithms which are Bowyer-Watson, circumcircle computation, and Ruppert's refinement we wrote from scratch in TypeScript. The convex hull uses the \texttt{d3-polygon} library since that is not part of the main algorithms we are studying in this assignment.
 
-The application lets you generate a random 2D point cloud then it triangulates the points and highlights where the holes and bad triangles are. You can then refine the mesh step by step or all at once and watch the holes get filled in with new points and better triangles.
+The application lets you generate a random 2D point cloud, then it triangulates the points and highlights where the holes and bad triangles are. You can then refine the mesh step by step or all at once and watch as the holes get filled in with new points and better shaped triangles.
 
 \section{Project Structure}
 
@@ -162,7 +162,7 @@ function midpoint(a: Point, b: Point): Point {
 
 \section{Core Algorithm: Bowyer-Watson}
 
-Bowyer-Watson is an incremental algorithm where each point in the point set is inserted one at a time into an existing triangulation. What the algorithm does is it checks after every insertion whether any of the existing triangles have their circumcircle violated by the new point. If a point lands inside the circumcircle of a triangle then that triangle is no longer valid under the Delaunay condition and it has to be removed. The algorithm then takes the hole that is left behind and fills it by connecting the edges of the hole back to the newly inserted point.
+Bowyer-Watson is an incremental algorithm where each point in the point set is inserted one at a time into an existing triangulation. What the algorithm does is after every insertion it checks whether any of the existing triangles have their circumcircle violated by the new point. If a point lands inside the circumcircle of a triangle then that triangle is no longer valid under the Delaunay condition so it has to be removed. The algorithm then takes the hole that is left behind from removing those triangles and fills it by connecting the edges of the hole back to the newly inserted point.
 
 \begin{enumerate}
     \item First we need a starting triangulation so we create a very large ``super-triangle'' that is big enough to contain every single point in our input set inside of it.
@@ -288,7 +288,7 @@ function bowyerWatson(points: Point[]): Triangle[] {
 
 \subsection{Circumcircle Computation}
 
-If you have three points that are not all sitting on the same line then there is always going to be exactly one circle you can draw that goes through all three of them. That circle is what we call the circumcircle. The center of it is the circumcenter and you can find it by drawing the perpendicular bisector of two of the triangle's edges and seeing where they cross each other. That crossing point is the circumcenter. We implemented this in \texttt{geometry.ts} using line equation helpers:
+If you have three points that are not all sitting on the same line then there is always going to be exactly one circle you can draw that passes through all three of them, that circle is what we call the circumcircle. The center of it is the circumcenter. You can find the circumcenter by drawing the perpendicular bisector of two of the triangle's edges and seeing where they cross each other, the crossing point is the circumcenter. We implemented this in \texttt{geometry.ts} using line equation helpers:
 
 \begin{lstlisting}[style=tsstyle, caption={Line geometry helpers (\texttt{geometry.ts})}]
 interface Line { a: number; b: number; c: number }
@@ -347,7 +347,7 @@ function circumcircle(p1: Point, p2: Point, p3: Point): Circle | null {
 
 \subsection{Point-in-Triangle Test}
 
-We need this test in a couple of places, both in the refinement to check if the circumcenter falls inside the triangle and also for the click interaction in the UI. It works by computing the cross product at each edge and checking if they all have the same sign:
+We need this test in a couple of places, in the refinement we use it to check if the circumcenter falls inside the triangle and we also use it for the click interaction in the UI. The way it works is it computes the cross product at each edge and then checks if they all have the same sign:
 
 \begin{lstlisting}[style=tsstyle, caption={Point-in-triangle test (\texttt{geometry.ts})}]
 function pointInTriangle(
@@ -374,7 +374,7 @@ function pointInTriangle(
 
 \section{Triangle Quality Metrics}
 
-Not every triangle that comes out of the Delaunay triangulation is going to look good. Some of them end up really large and some end up really thin and pointy. We need a way to flag these so we know which ones to fix. A triangle gets flagged as ``bad'' if its area is too large (default threshold 8000, adjustable with a slider) or if its smallest angle is too small (default 20\textdegree, also adjustable). The code for both checks:
+Not every triangle that comes out of the Delaunay triangulation is going to look good. Some of them end up really large, some end up really thin and pointy. We need a way to flag these so we know which ones need to be fixed. A triangle gets flagged as ``bad'' if its area is too large, the default threshold we set is 8000 but the user can adjust it with a slider, or if its smallest angle is too small which defaults to 20\textdegree and is also adjustable. The code for both checks:
 
 \begin{lstlisting}[style=tsstyle, caption={Triangle area via cross product (\texttt{geometry.ts})}]
 function triangleArea(p1: Point, p2: Point, p3: Point): number {
@@ -414,7 +414,7 @@ function minAngle(p1: Point, p2: Point, p3: Point): number {
 
 \section{Ruppert's Refinement Algorithm}
 
-So now we know which triangles are bad and we need to fix them. This is where Ruppert's refinement comes in. The idea is pretty straightforward, you pick a bad triangle, you find a good spot inside it to put a new point, you add that point to the point set, and then you re-run Bowyer-Watson so the whole mesh gets re-triangulated with the new point included. The full implementation is in \texttt{refinement.ts}:
+So now we know which triangles are bad and we need to fix them, this is where Ruppert's refinement comes in. The idea is you pick a bad triangle, find a good spot inside it to put a new point, add that point to the point set, and then re-run Bowyer-Watson so the whole mesh gets re-triangulated with the new point included. The full implementation is in \texttt{refinement.ts}:
 
 \begin{lstlisting}[style=tsstyle, caption={Helper functions for insertion point selection (\texttt{refinement.ts})}]
 const MAX_INSERTIONS_PER_STEP = 12  // cap per step
@@ -514,7 +514,7 @@ function refineOnce(
 }
 \end{lstlisting}
 
-After the new points have been inserted into the point set, the Bowyer-Watson algorithm is run again from scratch on the entire point set to produce a new Delaunay triangulation that incorporates the newly added points. This is because inserting points changes the topology of the mesh so the triangulation needs to be recomputed. The ``Refine All'' button in the interface repeats this refinement process multiple times until either there are no more bad triangles left in the mesh, or until the algorithm cannot insert any more points due to the distance and boundary constraints.
+After the new points have been inserted into the point set, the Bowyer-Watson algorithm is run again from scratch on the entire point set to produce a new Delaunay triangulation that incorporates the newly added points. We have to do this because inserting points changes the topology of the mesh so the triangulation needs to be recomputed from the beginning. The ``Refine All'' button in the interface repeats this refinement process multiple times until either there are no more bad triangles left in the mesh, or the algorithm cannot insert any more points because of the distance and boundary constraints.
 
 \section{Convex Hull}
 
@@ -539,7 +539,7 @@ function pointInConvexHull(point: Point, hull: Point[]): boolean {
 
 \section{User Interface}
 
-For the front-end visualization, the application renders all of the geometry inside a single SVG element with a viewBox of 700$\times$600 pixels. The user interacts with the application through the following controls that are placed above the SVG canvas:
+For the front end visualization, the application renders all of the geometry inside a single SVG element with a viewBox of 700$\times$600 pixels. The user interacts with the application through controls that are placed above the SVG canvas:
 
 \begin{itemize}
     \item \textbf{Random} --- generate 28 random points and triangulate.
@@ -552,7 +552,7 @@ For the front-end visualization, the application renders all of the geometry ins
     \item \textbf{Click on triangle} --- select it and view its stats.
 \end{itemize}
 
-We use color to communicate triangle quality to the user. Each triangle in the SVG canvas is filled with a color that corresponds to whether it passed or failed the quality thresholds, the reason we chose to do it this way is because it makes it immediately obvious where the problem areas are in the mesh without having to click on individual triangles. The color scheme is as follows:
+We use color to communicate triangle quality to the user. Each triangle in the SVG canvas is filled with a color that corresponds to whether it passed or failed the quality thresholds. We chose to do it this way because it makes it immediately obvious where the problem areas are in the mesh without having to click on individual triangles:
 \begin{itemize}
     \item \textbf{Green} --- good (passes both thresholds)
     \item \textbf{Orange} --- area too large
@@ -561,11 +561,11 @@ We use color to communicate triangle quality to the user. Each triangle in the S
     \item \textbf{Purple} --- currently selected
 \end{itemize}
 
-For the points we also use color to differentiate between the original random points and the ones that were inserted during refinement. The original points show up as dark circles and the refinement-inserted points show up as purple circles. We thought this distinction was important because it lets you see how much work the refinement algorithm actually did compared to the starting point set. There is also a statistics bar that we placed at the bottom of the page, it shows some numbers like total points, how many were added, triangle count, bad triangle count, and what the average minimum angle is across the whole mesh.
+For the points we also use color to differentiate between the original random points and the ones that were inserted during refinement. The original points show up as dark circles and the refinement inserted points show up as purple circles. We thought this distinction was important because it lets you see how much work the refinement algorithm actually did compared to the starting point set. There is also a statistics bar at the bottom of the page that shows total points, how many were added by refinement, triangle count, bad triangle count, and the average minimum angle across the whole mesh.
 
 \section{Results}
 
-To test the application we generated a set of 28 random points scattered across the canvas. The initial Delaunay triangulation of these points contained a large number of bad triangles which are shown in orange and yellow colors in Figure \ref{fig:web_before}. After clicking the ``Refine All'' button, the refinement algorithm ran multiple passes and inserted additional points into the mesh until all the triangles in the triangulation passed both the area and minimum angle quality thresholds. The result after refinement is shown in Figure \ref{fig:web_after} where most of the triangles are green indicating they are within acceptable quality. Figure \ref{fig:web_circumcircles} shows the circumcircle overlay where the dashed blue circles represent each triangle's circumcircle and we can verify that no point falls inside another triangle's circumcircle which confirms the Delaunay property is maintained.
+To test the application we generated a set of 28 random points scattered across the canvas. The initial Delaunay triangulation of these points contained a large number of bad triangles, shown in orange and yellow in Figure \ref{fig:web_before}. After clicking the ``Refine All'' button the refinement algorithm ran multiple passes and inserted additional points into the mesh until all the triangles passed both the area and minimum angle quality thresholds. The result after refinement is shown in Figure \ref{fig:web_after}, most of the triangles are green now which indicates they are within acceptable quality. Figure \ref{fig:web_circumcircles} shows the circumcircle overlay, the dashed blue circles represent each triangle's circumcircle and we can verify that no point falls inside another triangle's circumcircle which confirms that the Delaunay property is maintained.
 
 \begin{figure}[H]
     \centering
