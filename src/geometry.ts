@@ -1,12 +1,13 @@
 /**
- * geometry.ts — Pure computational geometry functions.
+ * geometry.ts — Computational geometry functions.
  *
- * Contains primitives (distance, angle, cross product), intersection tests,
- * point-in-polygon queries, and hull algorithms (concave + convex).
- * All functions are stateless and operate only on Point tuples.
+ * Uses d3-polygon for standard operations (point-in-polygon, convex hull)
+ * and implements concave hull (Moreira & Santos 2007) from scratch since
+ * no standard library provides it.
  */
 
 import type { Point } from './types'
+import { polygonContains, polygonHull } from 'd3-polygon'
 
 // ── Primitives ──────────────────────────────────────────────
 
@@ -37,10 +38,9 @@ export function cross(o: Point, a: Point, b: Point): number {
 
 /**
  * Tests whether segments (p1–p2) and (p3–p4) properly intersect.
- * Returns false if they share an endpoint (adjacency is not intersection).
+ * Returns false if they share an endpoint.
  */
 export function segmentsIntersect(p1: Point, p2: Point, p3: Point, p4: Point): boolean {
-  // Shared endpoint → not a proper intersection
   if ((p1[0] === p3[0] && p1[1] === p3[1]) ||
       (p1[0] === p4[0] && p1[1] === p4[1]) ||
       (p2[0] === p3[0] && p2[1] === p3[1]) ||
@@ -57,32 +57,31 @@ export function segmentsIntersect(p1: Point, p2: Point, p3: Point, p4: Point): b
          ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
 }
 
-// ── Point-in-polygon ────────────────────────────────────────
+// ── Point-in-polygon (d3-polygon) ───────────────────────────
 
 /**
- * Ray-casting algorithm: casts a horizontal ray from `pt` to the right
- * and counts how many polygon edges it crosses. Odd count → inside.
+ * Tests if a point is inside a polygon using d3-polygon's ray-casting.
  */
 export function pointInPolygon(pt: Point, polygon: Point[]): boolean {
-  let inside = false
-  const n = polygon.length
-  for (let i = 0, j = n - 1; i < n; j = i++) {
-    const xi = polygon[i][0], yi = polygon[i][1]
-    const xj = polygon[j][0], yj = polygon[j][1]
-    if (((yi > pt[1]) !== (yj > pt[1])) &&
-        (pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi)) {
-      inside = !inside
-    }
-  }
-  return inside
+  return polygonContains(polygon, pt)
+}
+
+// ── Convex hull (d3-polygon) ────────────────────────────────
+
+/**
+ * Computes the convex hull using d3-polygon (Andrew's monotone chain).
+ * Used as a fallback when the concave hull algorithm fails.
+ */
+export function convexHull(points: Point[]): Point[] {
+  const hull = polygonHull(points)
+  return hull ? [...hull] : points
 }
 
 // ── k-NN index ──────────────────────────────────────────────
 
 /**
  * For each point, pre-computes a sorted list of all other point indices
- * ordered by distance (nearest first). Used by the concave hull algorithm
- * to quickly find the k closest neighbors at each step.
+ * ordered by distance (nearest first).
  */
 function buildKnnIndex(points: Point[]): number[][] {
   const n = points.length
@@ -103,11 +102,8 @@ function buildKnnIndex(points: Point[]): number[][] {
 
 /**
  * Attempts to build a concave hull with a specific k value.
- *
- * Starting from the bottommost point, the algorithm walks clockwise:
- * at each step it picks the k nearest neighbors, sorts them by
- * right-hand turn angle, and selects the first candidate whose edge
- * doesn't intersect existing hull edges. Returns null if it gets stuck.
+ * Walks clockwise from the bottommost point, at each step picking
+ * the nearest k neighbors sorted by right-hand turn angle.
  */
 function tryHull(
   points: Point[],
@@ -118,12 +114,11 @@ function tryHull(
   const hull: Point[] = [points[startIdx]]
   const used = new Set<number>([startIdx])
   let currentIdx = startIdx
-  let prevAngle = Math.PI // Initial direction: pointing left
+  let prevAngle = Math.PI
 
   for (let step = 0; step < points.length; step++) {
     const neighbors = knnIndex[currentIdx].slice(0, k)
 
-    // Sort neighbors by clockwise turn from current heading
     const candidates = neighbors
       .map(nIdx => {
         const a = ptAngle(points[currentIdx], points[nIdx])
@@ -136,11 +131,10 @@ function tryHull(
 
     let found = false
     for (const cand of candidates) {
-      // Try closing the hull back to the start
       if (cand.idx === startIdx && hull.length >= 3) {
         let closingEdgeOk = true
         for (let i = 0; i < hull.length - 1; i++) {
-          if (i === hull.length - 2) continue // Skip adjacent edge
+          if (i === hull.length - 2) continue
           if (segmentsIntersect(points[currentIdx], points[startIdx], hull[i], hull[i + 1])) {
             closingEdgeOk = false
             break
@@ -152,7 +146,6 @@ function tryHull(
 
       if (used.has(cand.idx)) continue
 
-      // Check that the new edge doesn't cross any existing hull edge
       const newPt = points[cand.idx]
       let intersects = false
       for (let i = 0; i < hull.length - 1; i++) {
@@ -163,7 +156,6 @@ function tryHull(
       }
       if (intersects) continue
 
-      // Accept this candidate
       hull.push(newPt)
       used.add(cand.idx)
       prevAngle = ptAngle(newPt, points[currentIdx])
@@ -172,38 +164,33 @@ function tryHull(
       break
     }
 
-    if (!found) return null // Dead end — this k doesn't work
+    if (!found) return null
   }
 
-  return null // Didn't close within point count
+  return null
 }
 
 /**
- * Validates a hull by checking:
- * 1. No self-intersecting edges
- * 2. All input points are inside the hull (or within tolerance of an edge)
+ * Validates a hull: no self-intersections, all points contained.
  */
 function validateHull(hull: Point[], points: Point[]): boolean {
   if (hull.length < 3) return false
 
-  // Self-intersection check
   for (let i = 0; i < hull.length; i++) {
     const a = hull[i]
     const b = hull[(i + 1) % hull.length]
     for (let j = i + 2; j < hull.length; j++) {
-      if (i === 0 && j === hull.length - 1) continue // Adjacent edges
+      if (i === 0 && j === hull.length - 1) continue
       const c = hull[j]
       const d = hull[(j + 1) % hull.length]
       if (segmentsIntersect(a, b, c, d)) return false
     }
   }
 
-  // All-points-contained check
   const EDGE_TOLERANCE = 0.5
   for (const pt of points) {
     if (pointInPolygon(pt, hull)) continue
 
-    // Point might be exactly on an edge — check distance to each edge
     let onEdge = false
     for (let i = 0; i < hull.length; i++) {
       const a = hull[i]
@@ -224,19 +211,14 @@ function validateHull(hull: Point[], points: Point[]): boolean {
 }
 
 /**
- * Computes a concave hull of the given points using the k-nearest
- * neighbors algorithm (Moreira & Santos 2007).
- *
- * Tries increasing values of k (from kStart up to 8). Higher k produces
- * a smoother (more convex) hull; lower k produces a tighter boundary.
- * Falls back to convex hull if no valid concave hull is found.
+ * Computes a concave hull using k-nearest neighbors (Moreira & Santos 2007).
+ * Tries increasing k values; falls back to d3-polygon's convex hull.
  */
 export function concaveHull(points: Point[], kStart: number): Point[] {
   if (points.length < 3) return points
 
   const knnIndex = buildKnnIndex(points)
 
-  // Start from the bottommost point (highest y), then leftmost
   let startIdx = 0
   for (let i = 1; i < points.length; i++) {
     if (points[i][1] > points[startIdx][1] ||
@@ -245,43 +227,10 @@ export function concaveHull(points: Point[], kStart: number): Point[] {
     }
   }
 
-  // Try increasing k until we get a valid hull
   for (let k = Math.max(kStart, 4); k <= Math.min(points.length - 1, 8); k++) {
     const hull = tryHull(points, knnIndex, startIdx, k)
     if (hull && validateHull(hull, points)) return hull
   }
 
   return convexHull(points)
-}
-
-// ── Convex hull (Andrew's monotone chain) ───────────────────
-
-/**
- * Computes the convex hull using Andrew's monotone chain algorithm.
- * Used as a fallback when the concave hull algorithm fails.
- */
-export function convexHull(points: Point[]): Point[] {
-  const sorted = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1])
-
-  // Build lower hull (left to right)
-  const lower: Point[] = []
-  for (const p of sorted) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0)
-      lower.pop()
-    lower.push(p)
-  }
-
-  // Build upper hull (right to left)
-  const upper: Point[] = []
-  for (let i = sorted.length - 1; i >= 0; i--) {
-    const p = sorted[i]
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0)
-      upper.pop()
-    upper.push(p)
-  }
-
-  // Remove last point of each half (it's the first point of the other)
-  lower.pop()
-  upper.pop()
-  return lower.concat(upper)
 }

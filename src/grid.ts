@@ -2,8 +2,8 @@
  * grid.ts — Grid setup and the five pipeline steps.
  *
  *   Step 1: Grid display + hole creation  (UI in App.vue)
- *   Step 2: Outer boundary detection      (k-NN concave hull)
- *   Step 3: Inner hole detection          (flood-fill empty cells + concave hull)
+ *   Step 2: Outer boundary detection      (BoundaryExterior: k-ring clockwise walk)
+ *   Step 3: Inner hole detection          (BoundaryHole: O(N) 4-neighbor check)
  *   Step 4: Fill hole regions             (insert exact empty cell positions)
  *   Step 5: Delaunay triangulation        (d3-delaunay + boundary filtering)
  */
@@ -115,94 +115,218 @@ export function getVisiblePoints(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Step 2: Detect outer boundary (k-NN concave hull)
+// Shared helper
 // ═══════════════════════════════════════════════════════════════
 
-export function detectOuterBoundary(points: Point[], k: number): Point[] {
-  return concaveHull(points, k)
+/** True if any of the 4 cardinal neighbors of (x,y) is not in the occupied set. */
+function hasEmpty4Neighbor(x: number, y: number, occupied: Set<string>): boolean {
+  return !occupied.has(`${x},${y - 1}`) ||
+         !occupied.has(`${x + 1},${y}`) ||
+         !occupied.has(`${x},${y + 1}`) ||
+         !occupied.has(`${x - 1},${y}`)
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Step 3: Detect hole boundaries
+// Step 2: BoundaryExterior (k-ring clockwise walk)
 // ═══════════════════════════════════════════════════════════════
 //
 // Algorithm:
-//   1. Scan every grid cell inside the outer hull
-//   2. Cells with no visible point are "empty"
-//   3. Flood-fill connected empty cells into separate regions
-//   4. Discard regions touching outside the hull (part of outer shape)
-//   5. Compute concave hull of each region's empty cells
-//   6. Collect empty cell positions for fill step
+//   1. Find pFirst = topmost-leftmost occupied cell
+//   2. Grow clockwise:
+//      - Enumerate RNk(p) clockwise starting from direction (p → pPrev)
+//      - For each candidate q, check intermediate points qi on segment
+//        (p, q) at each ring distance i = 1..k
+//      - If qi is occupied AND any 4-neighbor of qi is empty → pNext = qi
+//   3. Stop when p returns to pFirst
+//   4. Falls back to concave hull if the walk doesn't close
+//
+// k controls smoothness: higher k = smoother, may skip small features.
 
-export function detectHoleBoundaries(
-  visiblePoints: Point[],
-  outerHull: Point[],
-  k: number
-): { hulls: Point[][]; emptyRegions: Point[][] } {
-  const visibleSet = new Set(visiblePoints.map(p => `${p[0]},${p[1]}`))
+export function detectOuterBoundary(points: Point[], k: number): Point[] {
+  if (points.length < 3) return points
 
-  // Find bounding box of outer hull
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  for (const [hx, hy] of outerHull) {
-    minX = Math.min(minX, hx)
-    minY = Math.min(minY, hy)
-    maxX = Math.max(maxX, hx)
-    maxY = Math.max(maxY, hy)
-  }
+  const occupied = new Set(points.map(p => `${p[0]},${p[1]}`))
 
-  // Classify cells inside the hull as occupied or empty
-  const insideHull = new Set<string>()
-  const empty = new Set<string>()
-  for (let y = Math.floor(minY); y <= Math.ceil(maxY); y++) {
-    for (let x = Math.floor(minX); x <= Math.ceil(maxX); x++) {
-      const key = `${x},${y}`
-      if (!pointInPolygon([x, y], outerHull)) continue
-      insideHull.add(key)
-      if (!visibleSet.has(key)) empty.add(key)
+  // 1. Find topmost-leftmost occupied cell
+  let start = points[0]
+  for (const p of points) {
+    if (p[1] < start[1] || (p[1] === start[1] && p[0] < start[0])) {
+      start = p
     }
   }
 
-  // Flood-fill empty cells into connected regions
-  const DIRECTIONS: [number, number][] = [[1,0],[-1,0],[0,1],[0,-1]]
+  const boundary: Point[] = [start]
+  const visited = new Set([`${start[0]},${start[1]}`])
+
+  let px = start[0], py = start[1]
+
+  // Initial direction (p → pPrev): pretend we came from the west
+  let backAngle = Math.PI
+
+  for (let iter = 0; iter < points.length * 2; iter++) {
+    // Try each ring distance 1, 2, ..., k in order.
+    // At each distance, sort boundary-eligible cells CW from backAngle.
+    // Only move to a larger ring if no unvisited candidates at the current ring.
+    // This ensures the walk follows the boundary tightly at distance 1,
+    // and only "jumps" to distance 2+ to cross gaps (smoother boundary).
+    let foundNext: Point | null = null
+
+    for (let ring = 1; ring <= k && !foundNext; ring++) {
+      const candidates: { x: number; y: number; turn: number }[] = []
+
+      for (let dx = -ring; dx <= ring; dx++) {
+        for (let dy = -ring; dy <= ring; dy++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue
+
+          const nx = px + dx, ny = py + dy
+          if (!occupied.has(`${nx},${ny}`)) continue
+          if (!hasEmpty4Neighbor(nx, ny, occupied)) continue
+
+          const angle = Math.atan2(dy, dx)
+          let turn = angle - backAngle
+          while (turn < 0) turn += Math.PI * 2
+          while (turn >= Math.PI * 2) turn -= Math.PI * 2
+
+          candidates.push({ x: nx, y: ny, turn })
+        }
+      }
+
+      candidates.sort((a, b) => a.turn - b.turn)
+
+      for (const cand of candidates) {
+        if (cand.x === start[0] && cand.y === start[1] && boundary.length >= 3) {
+          return boundary
+        }
+        if (!visited.has(`${cand.x},${cand.y}`)) {
+          foundNext = [cand.x, cand.y]
+          break
+        }
+      }
+    }
+
+    if (!foundNext) break
+
+    backAngle = Math.atan2(py - foundNext[1], px - foundNext[0])
+    px = foundNext[0]
+    py = foundNext[1]
+    boundary.push(foundNext)
+    visited.add(`${px},${py}`)
+  }
+
+  // Fallback: if walk didn't close, use concave hull
+  if (boundary.length < 3) return concaveHull(points, k)
+  return boundary
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Step 3: BoundaryHole (O(N) 4-neighbor check)
+// ═══════════════════════════════════════════════════════════════
+//
+// Algorithm:
+//   1. Mark all exterior boundary points from Step 2
+//   2. For every occupied cell pi:
+//      - If NOT an exterior boundary point
+//      - AND at least one 4-neighbor is empty
+//      → pi is a hole boundary point
+//   3. Cluster hole boundary points by 8-connectivity → one group per hole
+//   4. For each group, collect adjacent empty cells (for fill step)
+//   5. Compute concave hull of each group (for visualization)
+
+export function detectHoleBoundaries(
+  visiblePoints: Point[],
+  outerBoundary: Point[],
+  k: number
+): { hulls: Point[][]; emptyRegions: Point[][] } {
+  const occupied = new Set(visiblePoints.map(p => `${p[0]},${p[1]}`))
+  const exteriorSet = new Set(outerBoundary.map(p => `${p[0]},${p[1]}`))
+
+  // 1. Find all hole boundary points — O(N)
+  const holeBoundarySet = new Set<string>()
+  const holeBoundaryPoints: Point[] = []
+
+  for (const pt of visiblePoints) {
+    const key = `${pt[0]},${pt[1]}`
+    if (exteriorSet.has(key)) continue
+    if (hasEmpty4Neighbor(pt[0], pt[1], occupied)) {
+      holeBoundarySet.add(key)
+      holeBoundaryPoints.push(pt)
+    }
+  }
+
+  // 2. Cluster by 8-connectivity
+  const NEIGHBORS_8: [number, number][] = [
+    [1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]
+  ]
   const visited = new Set<string>()
   const hulls: Point[][] = []
   const emptyRegions: Point[][] = []
 
-  for (const key of empty) {
+  for (const pt of holeBoundaryPoints) {
+    const key = `${pt[0]},${pt[1]}`
     if (visited.has(key)) continue
 
-    const region = new Set<string>()
-    const stack = [key]
-    let touchesOutside = false
+    // Flood-fill this cluster
+    const cluster: Point[] = []
+    const stack: Point[] = [pt]
 
     while (stack.length > 0) {
       const cur = stack.pop()!
-      if (visited.has(cur) || !empty.has(cur)) continue
-      visited.add(cur)
-      region.add(cur)
+      const ck = `${cur[0]},${cur[1]}`
+      if (visited.has(ck)) continue
+      visited.add(ck)
+      cluster.push(cur)
 
-      const [cx, cy] = cur.split(',').map(Number)
-      for (const [dx, dy] of DIRECTIONS) {
-        const neighbor = `${cx + dx},${cy + dy}`
-        if (!insideHull.has(neighbor)) touchesOutside = true
-        if (!visited.has(neighbor) && empty.has(neighbor)) stack.push(neighbor)
+      for (const [dx, dy] of NEIGHBORS_8) {
+        const nk = `${cur[0] + dx},${cur[1] + dy}`
+        if (!visited.has(nk) && holeBoundarySet.has(nk)) {
+          stack.push([cur[0] + dx, cur[1] + dy])
+        }
       }
     }
 
-    // Only keep fully enclosed regions
-    if (region.size < 2 || touchesOutside) continue
+    if (cluster.length < 3) continue
 
-    // Convert to points
-    const pts: Point[] = [...region].map(k => {
-      const [x, y] = k.split(',').map(Number)
-      return [x, y] as Point
-    })
+    // 3. Flood-fill ALL empty cells inside this hole
+    //    Start from empty cells adjacent to boundary points,
+    //    then expand inward to capture the full hole interior.
+    const emptyFound = new Set<string>()
+    const emptyPts: Point[] = []
+    const emptyStack: string[] = []
+    const DIRS_4: [number, number][] = [[1,0],[-1,0],[0,1],[0,-1]]
 
-    // Compute concave hull for visualization
-    const hull = concaveHull(pts, k)
+    // Seed: empty cells adjacent to the boundary cluster
+    for (const cp of cluster) {
+      for (const [dx, dy] of NEIGHBORS_8) {
+        const nx = cp[0] + dx, ny = cp[1] + dy
+        const nk = `${nx},${ny}`
+        if (!occupied.has(nk) && !emptyFound.has(nk)) {
+          emptyFound.add(nk)
+          emptyStack.push(nk)
+        }
+      }
+    }
+
+    // Expand: flood-fill connected empty cells
+    while (emptyStack.length > 0) {
+      const ek = emptyStack.pop()!
+      const [ex, ey] = ek.split(',').map(Number)
+      emptyPts.push([ex, ey])
+
+      for (const [dx, dy] of DIRS_4) {
+        const nk = `${ex + dx},${ey + dy}`
+        if (!occupied.has(nk) && !emptyFound.has(nk)) {
+          emptyFound.add(nk)
+          emptyStack.push(nk)
+        }
+      }
+    }
+
+    // 4. Compute concave hull of the empty cells for visualization
+    const hullPts = emptyPts.length >= 3 ? emptyPts : cluster
+    const hull = concaveHull(hullPts, k)
     if (hull.length >= 3) {
       hulls.push(hull)
-      emptyRegions.push(pts)
+      emptyRegions.push(emptyPts)
     }
   }
 

@@ -17,8 +17,8 @@ defineEmits<{
 
 const steps = [
   { num: 1, label: 'Create Holes', desc: 'Click on dots or add random holes to the grid' },
-  { num: 2, label: 'Detect Boundary', desc: 'k-NN concave hull of all visible points' },
-  { num: 3, label: 'Detect Holes', desc: 'Flood-fill empty cells inside the boundary' },
+  { num: 2, label: 'Detect Boundary', desc: 'BoundaryExterior: k-ring clockwise walk' },
+  { num: 3, label: 'Detect Holes', desc: 'BoundaryHole: O(N) empty 4-neighbor check' },
   { num: 4, label: 'Fill Points', desc: 'Insert grid points inside detected holes' },
   { num: 5, label: 'Triangulate', desc: 'Delaunay triangulation of the complete point set' },
 ]
@@ -59,8 +59,8 @@ const steps = [
           k = {{ kValue }}
           <input
             type="range"
-            min="4"
-            max="8"
+            min="1"
+            max="5"
             :value="kValue"
             @input="$emit('update:kValue', Number(($event.target as HTMLInputElement).value))"
           />
