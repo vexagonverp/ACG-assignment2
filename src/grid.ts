@@ -39,12 +39,17 @@ export function generateBoundaryRadii(): number[] {
   return radii
 }
 
-function getBoundaryRadius(angle: number, radii: number[]): number {
+/**
+ * Interpolates radius at a given angle from evenly-spaced control radii.
+ * Shared by both outer boundary and hole blob shapes.
+ */
+function interpolateRadius(angle: number, radii: number[]): number {
   let a = angle
   if (a < 0) a += Math.PI * 2
-  const sector = (Math.PI * 2) / BOUNDARY_CONTROL_POINTS
+  const n = radii.length
+  const sector = (Math.PI * 2) / n
   const idx = Math.floor(a / sector)
-  const nextIdx = (idx + 1) % BOUNDARY_CONTROL_POINTS
+  const nextIdx = (idx + 1) % n
   const t = (a - idx * sector) / sector
   return radii[idx] * (1 - t) + radii[nextIdx] * t
 }
@@ -53,8 +58,7 @@ export function isInsideBoundary(col: number, row: number, radii: number[]): boo
   const dx = col - CENTER
   const dy = row - CENTER
   const dist = Math.sqrt(dx * dx + dy * dy)
-  const angle = Math.atan2(dy, dx)
-  return dist <= getBoundaryRadius(angle, radii)
+  return dist <= interpolateRadius(Math.atan2(dy, dx), radii)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -76,19 +80,7 @@ export function isInHole(col: number, row: number, holes: Hole[]): boolean {
     const dx = col - hole.cx
     const dy = row - hole.cy
     const dist = Math.sqrt(dx * dx + dy * dy)
-    const angle = Math.atan2(dy, dx)
-
-    const n = hole.numPoints
-    const sector = (Math.PI * 2) / n
-    let a = angle
-    if (a < 0) a += Math.PI * 2
-
-    const idx = Math.floor(a / sector)
-    const nextIdx = (idx + 1) % n
-    const t = (a - idx * sector) / sector
-    const blobRadius = hole.radii[idx] * (1 - t) + hole.radii[nextIdx] * t
-
-    if (dist <= blobRadius) return true
+    if (dist <= interpolateRadius(Math.atan2(dy, dx), hole.radii)) return true
   }
   return false
 }

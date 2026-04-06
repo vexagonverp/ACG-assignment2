@@ -9,80 +9,58 @@
 import type { Point } from './types'
 import { polygonContains, polygonHull } from 'd3-polygon'
 
-// ── Primitives ──────────────────────────────────────────────
+// ── Primitives (internal) ───────────────────────────────────
 
-/** Squared Euclidean distance (avoids sqrt for comparison use). */
-export function dist2(a: Point, b: Point): number {
+function dist2(a: Point, b: Point): number {
   return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 }
 
-/** Euclidean distance between two points. */
-export function ptDist(a: Point, b: Point): number {
+function ptDist(a: Point, b: Point): number {
   return Math.sqrt(dist2(a, b))
 }
 
-/** Angle (radians) from point `a` to point `b`. */
-export function ptAngle(a: Point, b: Point): number {
+function ptAngle(a: Point, b: Point): number {
   return Math.atan2(b[1] - a[1], b[0] - a[0])
 }
 
-/**
- * Cross product of vectors OA and OB.
- * Positive → counter-clockwise, negative → clockwise, zero → collinear.
- */
-export function cross(o: Point, a: Point, b: Point): number {
+function cross(o: Point, a: Point, b: Point): number {
   return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 }
 
-// ── Segment intersection ────────────────────────────────────
+// ── Segment intersection (internal) ─────────────────────────
 
-/**
- * Tests whether segments (p1–p2) and (p3–p4) properly intersect.
- * Returns false if they share an endpoint.
- */
-export function segmentsIntersect(p1: Point, p2: Point, p3: Point, p4: Point): boolean {
+function segmentsIntersect(p1: Point, p2: Point, p3: Point, p4: Point): boolean {
   if ((p1[0] === p3[0] && p1[1] === p3[1]) ||
       (p1[0] === p4[0] && p1[1] === p4[1]) ||
       (p2[0] === p3[0] && p2[1] === p3[1]) ||
       (p2[0] === p4[0] && p2[1] === p4[1])) {
     return false
   }
-
   const d1 = cross(p3, p4, p1)
   const d2 = cross(p3, p4, p2)
   const d3 = cross(p1, p2, p3)
   const d4 = cross(p1, p2, p4)
-
   return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
          ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
 }
 
 // ── Point-in-polygon (d3-polygon) ───────────────────────────
 
-/**
- * Tests if a point is inside a polygon using d3-polygon's ray-casting.
- */
+/** Delegates to d3-polygon's polygonContains (ray-casting). */
 export function pointInPolygon(pt: Point, polygon: Point[]): boolean {
   return polygonContains(polygon, pt)
 }
 
 // ── Convex hull (d3-polygon) ────────────────────────────────
 
-/**
- * Computes the convex hull using d3-polygon (Andrew's monotone chain).
- * Used as a fallback when the concave hull algorithm fails.
- */
-export function convexHull(points: Point[]): Point[] {
+/** Delegates to d3-polygon's polygonHull (Andrew's monotone chain). */
+function convexHull(points: Point[]): Point[] {
   const hull = polygonHull(points)
   return hull ? [...hull] : points
 }
 
-// ── k-NN index ──────────────────────────────────────────────
+// ── k-NN index (internal) ───────────────────────────────────
 
-/**
- * For each point, pre-computes a sorted list of all other point indices
- * ordered by distance (nearest first).
- */
 function buildKnnIndex(points: Point[]): number[][] {
   const n = points.length
   const index: number[][] = new Array(n)
@@ -102,8 +80,8 @@ function buildKnnIndex(points: Point[]): number[][] {
 
 /**
  * Attempts to build a concave hull with a specific k value.
- * Walks clockwise from the bottommost point, at each step picking
- * the nearest k neighbors sorted by right-hand turn angle.
+ * Walks clockwise from the bottommost point, picking the best
+ * candidate among k nearest neighbors at each step.
  */
 function tryHull(
   points: Point[],
@@ -131,21 +109,23 @@ function tryHull(
 
     let found = false
     for (const cand of candidates) {
+      // Try to close the loop
       if (cand.idx === startIdx && hull.length >= 3) {
-        let closingEdgeOk = true
+        let closingOk = true
         for (let i = 0; i < hull.length - 1; i++) {
           if (i === hull.length - 2) continue
           if (segmentsIntersect(points[currentIdx], points[startIdx], hull[i], hull[i + 1])) {
-            closingEdgeOk = false
+            closingOk = false
             break
           }
         }
-        if (closingEdgeOk) return hull
+        if (closingOk) return hull
         continue
       }
 
       if (used.has(cand.idx)) continue
 
+      // Check new edge doesn't cross existing hull edges
       const newPt = points[cand.idx]
       let intersects = false
       for (let i = 0; i < hull.length - 1; i++) {
@@ -167,27 +147,25 @@ function tryHull(
     if (!found) return null
   }
 
-  return null
+  return null // Loop exhausted without closing
 }
 
-/**
- * Validates a hull: no self-intersections, all points contained.
- */
+/** Validates: no self-intersections, all points inside or on the hull. */
 function validateHull(hull: Point[], points: Point[]): boolean {
   if (hull.length < 3) return false
 
+  // Self-intersection check
   for (let i = 0; i < hull.length; i++) {
     const a = hull[i]
     const b = hull[(i + 1) % hull.length]
     for (let j = i + 2; j < hull.length; j++) {
       if (i === 0 && j === hull.length - 1) continue
-      const c = hull[j]
-      const d = hull[(j + 1) % hull.length]
-      if (segmentsIntersect(a, b, c, d)) return false
+      if (segmentsIntersect(a, b, hull[j], hull[(j + 1) % hull.length])) return false
     }
   }
 
-  const EDGE_TOLERANCE = 0.5
+  // All-points-contained check
+  const TOLERANCE = 0.5
   for (const pt of points) {
     if (pointInPolygon(pt, hull)) continue
 
@@ -195,11 +173,10 @@ function validateHull(hull: Point[], points: Point[]): boolean {
     for (let i = 0; i < hull.length; i++) {
       const a = hull[i]
       const b = hull[(i + 1) % hull.length]
-      const distToEdge = Math.abs(cross(a, b, pt)) / ptDist(a, b)
-      const withinBounds =
-        Math.min(a[0], b[0]) - EDGE_TOLERANCE <= pt[0] && pt[0] <= Math.max(a[0], b[0]) + EDGE_TOLERANCE &&
-        Math.min(a[1], b[1]) - EDGE_TOLERANCE <= pt[1] && pt[1] <= Math.max(a[1], b[1]) + EDGE_TOLERANCE
-      if (distToEdge < EDGE_TOLERANCE && withinBounds) {
+      const d = Math.abs(cross(a, b, pt)) / ptDist(a, b)
+      if (d < TOLERANCE &&
+          Math.min(a[0], b[0]) - TOLERANCE <= pt[0] && pt[0] <= Math.max(a[0], b[0]) + TOLERANCE &&
+          Math.min(a[1], b[1]) - TOLERANCE <= pt[1] && pt[1] <= Math.max(a[1], b[1]) + TOLERANCE) {
         onEdge = true
         break
       }
@@ -219,6 +196,7 @@ export function concaveHull(points: Point[], kStart: number): Point[] {
 
   const knnIndex = buildKnnIndex(points)
 
+  // Start from the bottommost point (highest y), then leftmost
   let startIdx = 0
   for (let i = 1; i < points.length; i++) {
     if (points[i][1] > points[startIdx][1] ||
