@@ -87,505 +87,482 @@
 \chapter{FILLING HOLES ON THE 2D SURFACE OF A POINT CLOUD}
 % ===========================================================================
 
-When we have a 2D point cloud with gaps or sparse regions and we need a way to fill those holes with a good quality triangle mesh. The approach we took is to first build a Delaunay triangulation of the point cloud using the Bowyer-Watson algorithm then identify triangles that are too large or too thin, these are the ones covering the holes and sparse areas and use Ruppert's refinement algorithm to insert new points into those bad triangles until the mesh is filled in properly.
+For the implementation we used Vue 3 with Composition API and Vite for the frontend. The algorithms that are relevant to this assignment which are the boundary detection and the concave hull from Moreira \& Santos (2007) we implemented ourselves in TypeScript. For Delaunay triangulation and convex hull we just used \texttt{d3-delaunay} and \texttt{d3-polygon} .
 
-We built a web application to demonstrate this process using Vue 3 (Composition API) and Vite. The core algorithms which are Bowyer-Watson, circumcircle computation, and Ruppert's refinement we wrote from scratch in TypeScript. The convex hull uses the \texttt{d3-polygon} library since that is not part of the main algorithms we are studying in this assignment.
-
-The application lets us generate a random 2D point cloud then it triangulates the points and highlights where the holes and bad triangles are. We can then refine the mesh step by step or all at once and watch as the holes get filled in with new points and better shaped triangles.
-
-\section{Project Structure}
+\section{Project structure}
 
 \begin{verbatim}
 src/
-    geometry.ts       -- Types + math primitives (circumcircle, area, angle)
-    triangulation.ts  -- Bowyer-Watson algorithm
-    refinement.ts     -- Ruppert's refinement
-    hull.ts           -- Convex hull (d3-polygon wrapper)
-    App.vue           -- State, UI, rendering
+    types.ts              -- Point and Hole type definitions
+    geometry.ts           -- Concave hull, point-in-polygon, primitives
+    grid.ts               -- Grid config, 5-step pipeline functions
+    App.vue               -- State management, step orchestration
+    components/
+        GridCanvas.vue    -- Canvas rendering (points, hulls, triangles)
+        StepPanel.vue     -- Step controls, k slider, statistics
 \end{verbatim}
 
-\section{Data Types}
+We have two TypeScript files that do the computation \texttt{geometry.ts} is where we put all the math functions like distance between points, cross product, the whole concave hull algorithm etc then \texttt{grid.ts} imports those and uses them to build the five pipeline steps on top. \texttt{grid.ts} is where the boundary detection, hole detection, filling, and triangulation are implemented.\texttt{App.vue} is the main component that holds all the reactive state and calls the pipeline functions when user clicks the buttons. \texttt{GridCanvas.vue} render on HTML canvas. \texttt{StepPanel.vue} is the sidebar with buttons and $k$ slider.
 
-We defined these types in \texttt{geometry.ts} and they are shared across all the other files:
+\section{Data types}
 
-\begin{lstlisting}[style=tsstyle, caption={Shared types (\texttt{geometry.ts})}]
-interface Point {
-  x: number
-  y: number
-  __super?: boolean  // marks super-triangle vertices
-}
+We have two types that get used in almost every file, we put them in \texttt{types.ts}:
 
-interface Circle {
-  x: number
-  y: number
-  r: number
-}
+\begin{lstlisting}[style=tsstyle, caption={Shared types (\texttt{types.ts})}]
+type Point = [number, number]
 
-interface TriangleInfo {
-  p1: Point; p2: Point; p3: Point
-  area: number
-  angle: number        // smallest interior angle (degrees)
-  cc: Circle | null    // circumscribed circle (null if degenerate)
-  bigArea: boolean     // area exceeds threshold
-  smallAngle: boolean  // min angle below threshold
-  bad: boolean         // needs refinement (bigArea OR smallAngle)
+interface Hole {
+  cx: number       // center x in grid coordinates
+  cy: number       // center y in grid coordinates
+  radii: number[]  // radius at each control angle
+  numPoints: number // number of control points (8-12)
 }
 \end{lstlisting}
 
-We also have some small utility functions that get used everywhere:
+\section{Grid configuration}
 
-\begin{lstlisting}[style=tsstyle, caption={Utility functions (\texttt{geometry.ts})}]
-const EPSILON = 1e-10  // tolerance for float comparisons
+The full grid is 71 by 71 but we only put points in the center 50 by 50. The reason for the extra border of 10 cells on each side is because when the boundary walk algorithm runs it needs some empty space around the edges otherwise it would hit the grid border. All the grid numbers are constants at the top of \texttt{grid.ts}:
 
-// prevent NaN/Infinity from crashing SVG rendering
-function safe(v: number): number {
-  return isFinite(v) ? v : 0
-}
-
-// needed before passing to Math.acos
-function clamp(value: number): number {
-  return Math.max(-1, Math.min(1, value))
-}
-
-function distanceSq(a: Point, b: Point): number {
-  return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
-}
-
-function distance(a: Point, b: Point): number {
-  return Math.sqrt(distanceSq(a, b))
-}
-
-function midpoint(a: Point, b: Point): Point {
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
-}
+\begin{lstlisting}[style=tsstyle, caption={Grid constants (\texttt{grid.ts})}]
+const CANVAS_GRID_SIZE = 70
+const FILL_GRID_SIZE = 50
+const SPACING = 11
+const POINT_RADIUS = 2
+const CANVAS_SIZE = (CANVAS_GRID_SIZE + 1) * SPACING  // 781px
+const OFFSET = Math.floor(
+  (CANVAS_GRID_SIZE - FILL_GRID_SIZE) / 2)            // 10
 \end{lstlisting}
 
-\section{Core Algorithm: Bowyer-Watson}
+\section{Outer boundary shape}
 
-Bowyer-Watson is an incremental algorithm where each point in the point set is inserted one at a time into an existing triangulation. What the algorithm does is after every insertion it checks whether any of the existing triangles have their circumcircle violated by the new point. If a point lands inside the circumcircle of a triangle then that triangle is no longer valid under the Delaunay condition so it has to be removed. The algorithm then takes the hole that is left behind from removing those triangles and fills it by connecting the edges of the hole back to the newly inserted point.
+If we filled the 50 by 50 square with points the boundary detection would have nothing interesting to trace. Instead we generate a random outer boundary that looks like an irregular blob. The way it works is we pick 16 angles evenly spaced around the center of the grid and at each angle we assign a random radius, somewhere between 70\% and 100\% of half the grid size which is 25 cells. Because the radii are different at each angle the shape ends up looking organic instead of just a circle.
 
-\begin{enumerate}
-    \item First we need a starting triangulation so we create a very large ``super-triangle'' that is big enough to contain every single point in our input set inside of it.
-    \item Then for each point we want to insert:
-    \begin{enumerate}
-        \item Go through all the triangles and check which ones have a circumcircle that contains this new point, those are the ones that break the Delaunay rule.
-        \item Delete all of those bad triangles. This leaves a polygon shaped hole in the mesh.
-        \item Look at the edges of the deleted triangles and figure out which edges are on the boundary of the hole. An edge is on the boundary if it only belonged to one deleted triangle. If two deleted triangles shared an edge then that edge is on the inside of the hole not the boundary.
-        \item Take each boundary edge and make a new triangle by connecting it to the new point.
-    \end{enumerate}
-    \item After all the points are in, we go back and delete any triangle that still has one of the super-triangle's vertices. Those were just temporary scaffolding to get the algorithm started.
-\end{enumerate}
+The boundary check has the same implementation with interpolation as the hole check:
 
-The full implementation is in \texttt{triangulation.ts}. First the helper functions for edge detection:
-
-\begin{lstlisting}[style=tsstyle, caption={Edge helpers (\texttt{triangulation.ts})}]
-interface Triangle {
-  p: [Point, Point, Point]
+\begin{lstlisting}[style=tsstyle, caption={Boundary check (\texttt{grid.ts})}]
+function interpolateRadius(
+  angle: number, radii: number[]
+): number {
+  let a = angle
+  if (a < 0) a += Math.PI * 2
+  const n = radii.length
+  const sector = (Math.PI * 2) / n
+  const idx = Math.floor(a / sector)
+  const nextIdx = (idx + 1) % n
+  const t = (a - idx * sector) / sector
+  return radii[idx] * (1 - t) + radii[nextIdx] * t
 }
 
-// check if two edges are the same (works in either direction)
-function edgesMatch(e1: [Point, Point], e2: [Point, Point]): boolean {
-  return (e1[0] === e2[1] && e1[1] === e2[0])
-      || (e1[0] === e2[0] && e1[1] === e2[1])
-}
-
-// get all 3 edges of a triangle
-function triangleEdges(tri: Triangle): [Point, Point][] {
-  return [
-    [tri.p[0], tri.p[1]],
-    [tri.p[1], tri.p[2]],
-    [tri.p[2], tri.p[0]]
-  ]
-}
-
-// is this edge shared with another triangle in the list?
-function isSharedEdge(
-  edge: [Point, Point], ownerTri: Triangle, allTris: Triangle[]
+function isInsideBoundary(
+  col: number, row: number, radii: number[]
 ): boolean {
-  return allTris.some(other => {
-    if (other === ownerTri) return false
-    return triangleEdges(other).some(
-      otherEdge => edgesMatch(edge, otherEdge)
-    )
-  })
+  const dx = col - CENTER
+  const dy = row - CENTER
+  const dist = Math.sqrt(dx * dx + dy * dy)
+  return dist <= interpolateRadius(
+    Math.atan2(dy, dx), radii)
 }
+\end{lstlisting}
 
-// find boundary edges of the hole left by removing triangles
-function findBoundaryEdges(
-  removedTriangles: Triangle[]
-): [Point, Point][] {
-  const boundary: [Point, Point][] = []
-  for (const tri of removedTriangles) {
-    for (const edge of triangleEdges(tri)) {
-      if (!isSharedEdge(edge, tri, removedTriangles)) {
-        boundary.push(edge)
-      }
+This is the same \texttt{interpolateRadius} that holes use, only difference is holes have a different center point and fewer control radii (8 to 12 instead of 16).
+
+\section{Step 1: hole creation}
+
+Each hole gets a random base radius (2 to 5 cells) and 8 to 12 control angles, the per-angle radii are randomly scaled between 0.5x and 1.3x the base so each hole looks different. In the UI the user can click directly on a dot in the canvas and a hole gets created at that position.
+
+\begin{lstlisting}[style=tsstyle, caption={Hole creation (\texttt{grid.ts})}]
+function createHole(cx: number, cy: number): Hole {
+  const baseRadius = MIN_HOLE_RADIUS
+    + Math.random() * MAX_HOLE_RADIUS_EXTRA
+  const numPoints = MIN_HOLE_CONTROL_POINTS
+    + Math.floor(Math.random() * MAX_HOLE_CONTROL_EXTRA)
+  const radii: number[] = []
+  for (let j = 0; j < numPoints; j++) {
+    radii.push(baseRadius
+      * (HOLE_RADII_MIN_SCALE
+         + Math.random() * HOLE_RADII_RANDOM_SCALE))
+  }
+  return { cx, cy, radii, numPoints }
+}
+\end{lstlisting}
+
+When user is done adding holes we need to figure out which cells are actually visible (meaning inside the boundary and also not holes). So we loop every cell in the 50 by 50 area and check both conditions:
+
+\begin{lstlisting}[style=tsstyle, caption={Visible point collection (\texttt{grid.ts})}]
+function getVisiblePoints(
+  boundaryRadii: number[], holes: Hole[]
+): Point[] {
+  const pts: Point[] = []
+  for (let row = 0; row < FILL_GRID_SIZE; row++) {
+    for (let col = 0; col < FILL_GRID_SIZE; col++) {
+      if (!isInsideBoundary(col, row, boundaryRadii))
+        continue
+      const gCol = col + OFFSET
+      const gRow = row + OFFSET
+      if (isInHole(gCol, gRow, holes)) continue
+      pts.push([gCol, gRow])
     }
   }
+  return pts
+}
+\end{lstlisting}
+
+\section{Step 2: outer boundary detection}
+
+We want to trace the outer edge of the point cloud as an ordered list of cells, start by picking the cell that is highest up on the grid and furthest to the left if there are multiple at the same height.
+
+From there we do the walk at the current cell we scan outward in a square ring of distance 1 (the 8 cells immediately around it). For each cell in that ring we evaluate two conditions: is it occupied? And does it have at least one empty neighbor in the up/down/left/right directions? If both are true then this cell is a boundary candidate. We measure the angle we would need to turn clockwise from where we just came from in order to face this candidate, and after checking every cell in the ring we sort candidates by that turn angle, the one with the smallest turn is the most ``clockwise'' neighbor and that is where we evaluate next.
+
+Sometimes ring 1 has no new candidates because every boundary cell at distance 1 was already visited. When that happens we expand to ring 2, which is the square of cells at 2 cells away from current position. We keep expanding up to ring $k$. $k$ controls how far we are willing to jump. Ring 1 always gets priority because we want the boundary to be as tight as possible, larger rings are only a fallback for when there are gaps.
+
+\texttt{findTopLeft} in \texttt{geometry.ts} picks the starting cell:
+
+\begin{lstlisting}[style=tsstyle, caption={Finding the start cell (\texttt{geometry.ts})}]
+function findTopLeft(
+  points: Point[]
+): { point: Point; index: number } {
+  let bestIndex = 0
+  for (let i = 1; i < points.length; i++) {
+    const [x, y] = points[i]
+    const [bestX, bestY] = points[bestIndex]
+    if (y < bestY || (y === bestY && x < bestX)) {
+      bestIndex = i
+    }
+  }
+  return { point: points[bestIndex], index: bestIndex }
+}
+\end{lstlisting}
+
+The turn angle can be negative or bigger than $2\pi$ depending on the direction so we need to normalize it into $[0, 2\pi)$ with modulo.
+
+\begin{lstlisting}[style=tsstyle, caption={Angle normalization (\texttt{geometry.ts})}]
+function normalizeAngle(angle: number): number {
+  const TWO_PI = Math.PI * 2
+  return ((angle % TWO_PI) + TWO_PI) % TWO_PI
+}
+\end{lstlisting}
+
+The loop runs until either the walk comes back to the start cell which means we successfully traced the whole boundary, or it cannot find any next cell to go to which means something went wrong and we have to fall back to concave hull:
+
+\begin{lstlisting}[style=tsstyle, caption={Boundary walk (\texttt{grid.ts})}]
+function detectOuterBoundary(
+  points: Point[], k: number
+): Point[] {
+  if (points.length < 3) return points
+  const occupied = new Set(
+    points.map(p => gridKey(p[0], p[1])))
+  const { point: start } = findTopLeft(points)
+  const boundary: Point[] = [start]
+  const visited = new Set(
+    [gridKey(start[0], start[1])])
+  let currentX = start[0], currentY = start[1]
+  let backAngle = Math.PI // pretend we came from west
+
+  for (let iter = 0;
+       iter < points.length * 2; iter++) {
+    let nextPoint: Point | null = null
+
+    for (let ring = 1;
+         ring <= k && !nextPoint; ring++) {
+      const candidates: {
+        x: number; y: number; turn: number
+      }[] = []
+      for (let dx = -ring; dx <= ring; dx++) {
+        for (let dy = -ring; dy <= ring; dy++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy))
+              !== ring) continue
+          const nx = currentX + dx
+          const ny = currentY + dy
+          if (!occupied.has(gridKey(nx, ny))) continue
+          if (!hasEmpty4Neighbor(nx, ny, occupied))
+            continue
+          const angle = Math.atan2(dy, dx)
+          const turn =
+            normalizeAngle(angle - backAngle)
+          candidates.push({ x: nx, y: ny, turn })
+        }
+      }
+      candidates.sort((a, b) => a.turn - b.turn)
+      for (const c of candidates) {
+        if (c.x === start[0] && c.y === start[1]
+            && boundary.length >= 3)
+          return boundary
+        if (!visited.has(gridKey(c.x, c.y))) {
+          nextPoint = [c.x, c.y]
+          break
+        }
+      }
+    }
+    if (!nextPoint) break
+    backAngle = Math.atan2(
+      currentY - nextPoint[1],
+      currentX - nextPoint[0])
+    currentX = nextPoint[0]
+    currentY = nextPoint[1]
+    boundary.push(nextPoint)
+    visited.add(gridKey(currentX, currentY))
+  }
+
+  if (boundary.length < 3)
+    return concaveHull(points, k)
   return boundary
 }
 \end{lstlisting}
 
-The circumcircle containment test that Bowyer-Watson uses to decide which triangles to remove:
+\section{Step 3: hole boundary detection}
 
-\begin{lstlisting}[style=tsstyle, caption={Circumcircle containment test (\texttt{triangulation.ts})}]
-function isInsideCircumcircle(point: Point, tri: Triangle): boolean {
-  const cc = circumcircle(tri.p[0], tri.p[1], tri.p[2])
-  if (!cc) return false
+To detect the holes we need to separate empty cells that are outside the boundary from empty cells that are inside a hole. We do this with a flood-fill that starts from every empty cells on the four edges of the grid. The fill expands inward through 4-connected empty neighbors (up, down, left, right). Any empty cells that the fill reaches is marked as exterior and any empty cells that the fill does not reach is classified as a hole.
 
-  const distToCenter = (point.x - cc.x) ** 2 + (point.y - cc.y) ** 2
-  const radiusSq = cc.r ** 2
-  return distToCenter <= radiusSq + EPSILON
-}
-\end{lstlisting}
+\begin{lstlisting}[style=tsstyle, caption={Exterior flood-fill (\texttt{grid.ts})}]
+function findExteriorEmptyCells(
+  occupied: Set<string>
+): Set<string> {
+  const exterior = new Set<string>()
+  const stack: Point[] = []
+  const minB = OFFSET
+  const maxB = OFFSET + FILL_GRID_SIZE - 1
 
-And the main Bowyer-Watson function that puts it all together:
-
-\begin{lstlisting}[style=tsstyle, caption={Bowyer-Watson algorithm (\texttt{triangulation.ts})}]
-function bowyerWatson(points: Point[]): Triangle[] {
-  if (points.length < 3) return []
-
-  // Step 1: super-triangle that contains all points
-  const minX = Math.min(...points.map(p => p.x)) - 100
-  const maxX = Math.max(...points.map(p => p.x)) + 100
-  const minY = Math.min(...points.map(p => p.y)) - 100
-  const maxY = Math.max(...points.map(p => p.y)) + 100
-  const padding = Math.max(maxX - minX, maxY - minY) * 2
-
-  const superA: Point = { x: minX - padding, y: minY - 1, __super: true }
-  const superB: Point = { x: minX + padding, y: minY - 1, __super: true }
-  const superC: Point = {
-    x: (minX + maxX) / 2, y: maxY + padding, __super: true
-  }
-
-  let triangles: Triangle[] = [{ p: [superA, superB, superC] }]
-
-  // Step 2: insert each point
-  for (const point of points) {
-    const invalidated: Triangle[] = []
-    const kept: Triangle[] = []
-
-    for (const tri of triangles) {
-      if (isInsideCircumcircle(point, tri)) {
-        invalidated.push(tri)
-      } else {
-        kept.push(tri)
+  // seed: empty cells on the 4 grid edges
+  for (let x = minB; x <= maxB; x++) {
+    for (const y of [minB, maxB]) {
+      const key = gridKey(x, y)
+      if (!occupied.has(key)
+          && !exterior.has(key)) {
+        exterior.add(key)
+        stack.push([x, y])
       }
     }
-
-    const boundary = findBoundaryEdges(invalidated)
-
-    triangles = kept
-    for (const [edgeA, edgeB] of boundary) {
-      triangles.push({ p: [edgeA, edgeB, point] })
+  }
+  for (let y = minB + 1; y < maxB; y++) {
+    for (const x of [minB, maxB]) {
+      const key = gridKey(x, y)
+      if (!occupied.has(key)
+          && !exterior.has(key)) {
+        exterior.add(key)
+        stack.push([x, y])
+      }
     }
   }
 
-  // Step 3: remove super-triangle scaffolding
-  return triangles.filter(tri => !tri.p.some(p => p.__super))
-}
-\end{lstlisting}
-
-\subsection{Circumcircle Computation}
-
-If we have three points that are not all sitting on the same line then there is always going to be exactly one circle we can draw that passes through all three of them, that circle is what we call the circumcircle and the center of it is the circumcenter. We can find the circumcenter by drawing the perpendicular bisector of two of the triangle's edges and seeing where they cross each other, the crossing point is the circumcenter. We implemented this in \texttt{geometry.ts} using line equation helpers:
-
-\begin{lstlisting}[style=tsstyle, caption={Line geometry helpers (\texttt{geometry.ts})}]
-interface Line { a: number; b: number; c: number }
-
-// derive line equation ax + by = c from two points
-function lineFromPoints(p1: Point, p2: Point): Line {
-  const a = p2.y - p1.y
-  const b = p1.x - p2.x
-  const c = a * p1.x + b * p1.y
-  return { a, b, c }
-}
-
-// rotate line 90 deg and force through midpoint
-function perpendicularBisector(line: Line, mid: Point): Line {
-  const a = -line.b        // swap and negate one
-  const b = line.a
-  const c = a * mid.x + b * mid.y  // plug in midpoint
-  return { a, b, c }
-}
-
-// Cramer's rule: solve two lines for intersection
-function lineIntersection(l1: Line, l2: Line): Point | null {
-  const det = l1.a * l2.b - l2.a * l1.b
-  if (Math.abs(det) < EPSILON) return null // parallel = collinear
-
-  const x = (l2.b * l1.c - l1.b * l2.c) / det
-  const y = (l1.a * l2.c - l2.a * l1.c) / det
-  if (!isFinite(x) || !isFinite(y)) return null
-  return { x, y }
-}
-\end{lstlisting}
-
-\begin{lstlisting}[style=tsstyle, caption={Circumcircle computation (\texttt{geometry.ts})}]
-function circumcircle(p1: Point, p2: Point, p3: Point): Circle | null {
-  // Step 1: line equations for two edges
-  const lineAB = lineFromPoints(p1, p2)
-  const lineBC = lineFromPoints(p2, p3)
-
-  // Step 2: perpendicular bisectors through each midpoint
-  const midAB = midpoint(p1, p2)
-  const midBC = midpoint(p2, p3)
-  const bisectorAB = perpendicularBisector(lineAB, midAB)
-  const bisectorBC = perpendicularBisector(lineBC, midBC)
-
-  // Step 3: circumcenter = where the bisectors cross
-  const center = lineIntersection(bisectorAB, bisectorBC)
-  if (!center) return null // collinear points, no circle
-
-  // Step 4: radius = distance from center to any vertex
-  const radius = distance(center, p1)
-  if (!isFinite(radius)) return null
-
-  return { x: center.x, y: center.y, r: radius }
-}
-\end{lstlisting}
-
-\subsection{Point-in-Triangle Test}
-
-We need this test in a couple of places, in the refinement we use it to check if the circumcenter falls inside the triangle and we also use it for the click interaction in the UI. The way it works is it computes the cross product at each edge and then checks if they all have the same sign:
-
-\begin{lstlisting}[style=tsstyle, caption={Point-in-triangle test (\texttt{geometry.ts})}]
-function pointInTriangle(
-  px: number, py: number, p1: Point, p2: Point, p3: Point
-): boolean {
-  const cross1 = (px - p2.x) * (p1.y - p2.y)
-               - (p1.x - p2.x) * (py - p2.y)
-  const cross2 = (px - p3.x) * (p2.y - p3.y)
-               - (p2.x - p3.x) * (py - p3.y)
-  const cross3 = (px - p1.x) * (p3.y - p1.y)
-               - (p3.x - p1.x) * (py - p1.y)
-
-  const hasNegative = (cross1 < -EPSILON)
-                   || (cross2 < -EPSILON)
-                   || (cross3 < -EPSILON)
-  const hasPositive = (cross1 > EPSILON)
-                   || (cross2 > EPSILON)
-                   || (cross3 > EPSILON)
-
-  // inside only if all cross products have the same sign
-  return !(hasNegative && hasPositive)
-}
-\end{lstlisting}
-
-\section{Triangle Quality Metrics}
-
-Not every triangle that comes out of the Delaunay triangulation is going to look good. As a matter of fact, some will end up really large, some end up really thin and pointy and we need a way to flag these so we know which ones need to be fixed. A triangle gets flagged as ``bad'' if its area is too large, the default threshold we set is 8000 but the user can adjust it with a slider, or if its smallest angle is too small which defaults to 20\textdegree and is also adjustable. The code for both checks:
-
-\begin{lstlisting}[style=tsstyle, caption={Triangle area via cross product (\texttt{geometry.ts})}]
-function triangleArea(p1: Point, p2: Point, p3: Point): number {
-  const abX = p2.x - p1.x
-  const abY = p2.y - p1.y
-  const acX = p3.x - p1.x
-  const acY = p3.y - p1.y
-
-  const crossProduct = abX * acY - acX * abY
-  const area = Math.abs(crossProduct) / 2
-  return isFinite(area) ? area : 0
-}
-\end{lstlisting}
-
-\begin{lstlisting}[style=tsstyle, caption={Minimum angle via law of cosines (\texttt{geometry.ts})}]
-function minAngle(p1: Point, p2: Point, p3: Point): number {
-  const sideA = distance(p2, p3)  // opposite p1
-  const sideB = distance(p1, p3)  // opposite p2
-  const sideC = distance(p1, p2)  // opposite p3
-
-  if (sideA < EPSILON || sideB < EPSILON || sideC < EPSILON) return 0
-
-  const aSq = sideA ** 2, bSq = sideB ** 2, cSq = sideC ** 2
-
-  // law of cosines: angle = acos((b^2 + c^2 - a^2) / 2bc)
-  const angleAtP1 = Math.acos(clamp(
-    (bSq + cSq - aSq) / (2 * sideB * sideC)))
-  const angleAtP2 = Math.acos(clamp(
-    (aSq + cSq - bSq) / (2 * sideA * sideC)))
-  const angleAtP3 = Math.acos(clamp(
-    (aSq + bSq - cSq) / (2 * sideA * sideB)))
-
-  const minRadians = Math.min(angleAtP1, angleAtP2, angleAtP3)
-  return minRadians * (180 / Math.PI)  // convert to degrees
-}
-\end{lstlisting}
-
-\section{Ruppert's Refinement Algorithm}
-
-At this stage we know which triangles are not up to par with our definition of good triangle and we need to refine them, this is where Ruppert's refinement comes in. The idea is we pick a bad triangle, find a good spot inside it to put a new point and add that point to the point set then re-run Bowyer-Watson so the whole mesh gets re-triangulated with the new point included. The full implementation is in \texttt{refinement.ts}:
-
-\begin{lstlisting}[style=tsstyle, caption={Helper functions for insertion point selection (\texttt{refinement.ts})}]
-const MAX_INSERTIONS_PER_STEP = 12  // cap per step
-const MIN_DISTANCE_SQ = 100         // 10px squared
-
-// midpoint of the longest of the 3 edges
-function longestEdgeMidpoint(
-  p1: Point, p2: Point, p3: Point
-): Point {
-  const edges: [Point, Point][] = [[p1, p2], [p2, p3], [p1, p3]]
-  let longestEdge = edges[0]
-  let longestLenSq = 0
-
-  for (const [a, b] of edges) {
-    const lenSq = (a.x - b.x) ** 2 + (a.y - b.y) ** 2
-    if (lenSq > longestLenSq) {
-      longestLenSq = lenSq
-      longestEdge = [a, b]
+  // expand inward
+  while (stack.length > 0) {
+    const [cx, cy] = stack.pop()!
+    for (const [dx, dy] of NEIGHBORS_4) {
+      const nx = cx + dx, ny = cy + dy
+      if (nx < minB || nx > maxB
+          || ny < minB || ny > maxB) continue
+      const key = gridKey(nx, ny)
+      if (!occupied.has(key)
+          && !exterior.has(key)) {
+        exterior.add(key)
+        stack.push([nx, ny])
+      }
     }
   }
-  return {
-    x: (longestEdge[0].x + longestEdge[1].x) / 2,
-    y: (longestEdge[0].y + longestEdge[1].y) / 2
-  }
-}
-
-// average of the 3 vertex positions
-function centroid(p1: Point, p2: Point, p3: Point): Point {
-  return {
-    x: (p1.x + p2.x + p3.x) / 3,
-    y: (p1.y + p2.y + p3.y) / 3
-  }
-}
-
-// is this point too close to any existing point?
-function isTooClose(
-  candidate: Point, existingPoints: Point[]
-): boolean {
-  return existingPoints.some(
-    p => (p.x - candidate.x) ** 2
-       + (p.y - candidate.y) ** 2 < MIN_DISTANCE_SQ
-  )
+  return exterior
 }
 \end{lstlisting}
 
-\begin{lstlisting}[style=tsstyle, caption={Insertion point selection: circumcenter then fallbacks (\texttt{refinement.ts})}]
-function pickInsertionPoint(tri: TriangleInfo): Point | null {
-  const { p1, p2, p3, cc } = tri
+With the exterior set computed, we scan every occupied cell and check its 4 neighbors, if any neighbor is empty and not in the exterior set then that occupied cell is on the edge of a hole. This produces a flat list of hole boundary cells. To separate them into per-hole groups we run BFS with 8-connectivity (including diagonals) which gives one cluster per hole.
 
-  if (cc) {
-    // try circumcenter first (best for angle improvement)
-    const circumcenter = { x: cc.x, y: cc.y }
-    if (pointInTriangle(circumcenter.x, circumcenter.y, p1, p2, p3)) {
-      return circumcenter
+For each cluster we run a second flood-fill starting from empty cells adjacent to the cluster boundary and expanding through non-exterior empties. This collects all interior cells of that hole and a concave hull is computed around each cluster for visualization.
+
+\texttt{detectHoleBoundaries} is where all of this happens:
+
+\begin{lstlisting}[style=tsstyle, caption={Hole detection pipeline (\texttt{grid.ts})}]
+function detectHoleBoundaries(
+  visiblePoints: Point[], k: number
+): { hulls: Point[][]; emptyRegions: Point[][] } {
+  const occupied = new Set(
+    visiblePoints.map(p => gridKey(p[0], p[1])))
+  const exteriorEmpty =
+    findExteriorEmptyCells(occupied)
+  const holeBoundary = findHoleBoundaryPoints(
+    visiblePoints, occupied, exteriorEmpty)
+  const clusters = clusterByConnectivity(
+    holeBoundary.points, holeBoundary.keys)
+
+  const hulls: Point[][] = []
+  const emptyRegions: Point[][] = []
+
+  for (const cluster of clusters) {
+    const emptyPoints = floodFillEmptyRegion(
+      cluster, occupied, exteriorEmpty)
+    const hullInput = emptyPoints.length >= 3
+      ? emptyPoints : cluster
+    const hull = concaveHull(hullInput, k)
+    if (hull.length >= 3) {
+      hulls.push(hull)
+      emptyRegions.push(emptyPoints)
     }
-    // circumcenter outside triangle -> midpoint of longest edge
-    return longestEdgeMidpoint(p1, p2, p3)
   }
-
-  // circumcircle failed (degenerate) -> centroid
-  return centroid(p1, p2, p3)
+  return { hulls, emptyRegions }
 }
 \end{lstlisting}
 
-\begin{lstlisting}[style=tsstyle, caption={One refinement pass (\texttt{refinement.ts})}]
-function refineOnce(
-  triangleData: TriangleInfo[],
-  allPoints: Point[],
-  hull: Point[]
+The three helpers inside are: \texttt{findHoleBoundaryPoints} which does the neighbor checking to find cells on hole edges. \texttt{clusterByConnectivity} which is the 8-connected BFS for grouping (we specifically use 8 not 4 here because diagonal boundary cells should stay in the same group). And \texttt{floodFillEmptyRegion} which fills inward from one cluster to get its interior cells, these are the cells that step 4 will later turn into new points.
+
+\section{Concave hull (Moreira \& Santos 2007)}
+
+Concave hulls show up twice in our pipeline. In step 2 when the boundary walk cannot close the loop we fall back to concave hull. In step 3 we need a polygon around each hole cluster for drawing. The implementation is similar to the boundary walk except the algorithm works on scattered points instead of grid cells.
+
+The algorithm precomputes a k-nearest-neighbor table, for every point it sorts all other points by squared distance. After that the algorithm picks the bottommost-leftmost point as starting position, the walk goes clockwise: at each step look at $k$ nearest neighbors, compute clockwise turn for each, try them from smallest turn to largest. Before moving to a candidate, verify that the edge from current to candidate does not intersect with any edge already placed in the hull.
+
+\begin{lstlisting}[style=tsstyle, caption={One concave hull attempt (\texttt{geometry.ts})}]
+function tryHull(
+  points: Point[], knnIndex: number[][],
+  startIdx: number, k: number
+): Point[] | null {
+  const hull: Point[] = [points[startIdx]]
+  const used = new Set<number>([startIdx])
+  let currentIdx = startIdx
+  let prevAngle = Math.PI
+
+  for (let step = 0;
+       step < points.length; step++) {
+    const neighbors =
+      knnIndex[currentIdx].slice(0, k)
+    const candidates = neighbors
+      .map(ni => {
+        const angle =
+          ptAngle(points[currentIdx], points[ni])
+        const turn =
+          normalizeAngle(prevAngle - angle)
+        return { idx: ni, angle, turn }
+      })
+      .sort((a, b) => a.turn - b.turn)
+
+    let found = false
+    for (const cand of candidates) {
+      if (cand.idx === startIdx
+          && hull.length >= 3) {
+        if (canCloseLoop(
+          hull, points[currentIdx],
+          points[startIdx]))
+          return hull
+        continue
+      }
+      if (used.has(cand.idx)) continue
+      const nextPoint = points[cand.idx]
+      if (canExtendTo(
+        hull, points[currentIdx], nextPoint)) {
+        hull.push(nextPoint)
+        used.add(cand.idx)
+        prevAngle = ptAngle(
+          nextPoint, points[currentIdx])
+        currentIdx = cand.idx
+        found = true
+        break
+      }
+    }
+    if (!found) return null
+  }
+  return null
+}
+\end{lstlisting}
+
+\texttt{canCloseLoop} and \texttt{canExtendTo} check whether a new edge would cross any existing hull edge. They use the cross product sign test on the two segments. After \texttt{tryHull} produces a result, \texttt{validateHull} confirms that no edges self-intersect and that all input points lie inside the polygon or within 0.5 pixels of an edge (a tolerance needed for floating point precision).
+
+\texttt{tryHull} can return null if it gets stuck so we try $k$ values from $\max(k_\text{start}, 4)$ up to $\min(n-1, 8)$ and return the first valid hull. If none work we fall back to convex hull from \texttt{d3-polygon}.
+
+\section{Step 4: fill hole points}
+
+We take the empty cell positions that \texttt{floodFillEmptyRegion} found for each hole and add them as new points and checking against a set of existing points so we do not add duplicates:
+
+\begin{lstlisting}[style=tsstyle, caption={Filling holes (\texttt{grid.ts})}]
+function fillHolePoints(
+  emptyRegions: Point[][],
+  existingPoints: Point[]
 ): Point[] {
-  // sort bad triangles by area descending (worst first)
-  const badTriangles = triangleData
-    .filter(t => t.bad)
-    .sort((a, b) => b.area - a.area)
-
-  if (badTriangles.length === 0) return []
-
+  const existing = new Set(
+    existingPoints.map(p => gridKey(p[0], p[1])))
   const newPoints: Point[] = []
 
-  for (const tri of badTriangles) {
-    if (newPoints.length >= MAX_INSERTIONS_PER_STEP) break
-
-    const candidate = pickInsertionPoint(tri)
-    if (!candidate || !isFinite(candidate.x)
-                   || !isFinite(candidate.y)) continue
-
-    // must be inside original point cloud boundary
-    if (!pointInConvexHull(candidate, hull)) continue
-
-    // must not be too close to existing points
-    if (isTooClose(candidate, [...allPoints, ...newPoints]))
-      continue
-
-    newPoints.push(candidate)
+  for (const region of emptyRegions) {
+    for (const pt of region) {
+      const key = gridKey(pt[0], pt[1])
+      if (existing.has(key)) continue
+      newPoints.push(pt)
+      existing.add(key)
+    }
   }
   return newPoints
 }
 \end{lstlisting}
 
-After the new points have been inserted into the point set, the Bowyer-Watson algorithm is run again on the entire point set to produce a new Delaunay triangulation that incorporates the newly added points. We have to do this because inserting points changes the topology of the mesh so the triangulation needs to be recomputed from the beginning. The ``Refine All'' button in the interface repeats this refinement process multiple times until either there are no more bad triangles left in the mesh, or the algorithm cannot insert any more points because of the distance and boundary constraints.
+\section{Step 5: Delaunay triangulation}
 
-\section{Convex Hull}
+We combine the original visible points with the fill points from step 4 and run Delaunay on everything using \texttt{d3-delaunay}. For every triangle that comes out of Delaunay we test 4 sample points: the centroid (average of the 3 vertices) and the midpoint of each edge. If all 4 are inside the outer hull polygon from step 2 then the triangle is good, otherwise we discard it.
 
-We use \texttt{d3-polygon} for the convex hull since it is not part of the algorithms we are studying. The hull is used to prevent the refinement from adding points outside the original point cloud boundary. The wrapper is in \texttt{hull.ts}:
+\begin{lstlisting}[style=tsstyle, caption={Triangulation with hull filtering (\texttt{grid.ts})}]
+function triangulatePoints(
+  allPoints: Point[], outerHull: Point[]
+): [Point, Point, Point][] {
+  if (allPoints.length < 3) return []
 
-\begin{lstlisting}[style=tsstyle, caption={Convex hull wrapper (\texttt{hull.ts})}]
-import { polygonHull, polygonContains } from 'd3-polygon'
+  const coords =
+    new Float64Array(allPoints.length * 2)
+  for (let i = 0; i < allPoints.length; i++) {
+    coords[i * 2] = allPoints[i][0]
+    coords[i * 2 + 1] = allPoints[i][1]
+  }
 
-function convexHull(points: Point[]): Point[] {
-  const coords: [number, number][] = points.map(p => [p.x, p.y])
-  const hull = polygonHull(coords)
-  if (!hull) return points.slice(0, 3)
-  return hull.map(([x, y]) => ({ x, y }))
-}
+  const delaunay = new Delaunay(coords)
+  const triangles: [Point, Point, Point][] = []
 
-function pointInConvexHull(point: Point, hull: Point[]): boolean {
-  if (hull.length < 3) return true
-  const polygon: [number, number][] = hull.map(p => [p.x, p.y])
-  return polygonContains(polygon, [point.x, point.y])
+  for (let i = 0;
+       i < delaunay.triangles.length; i += 3) {
+    const p0 = allPoints[delaunay.triangles[i]]
+    const p1 = allPoints[delaunay.triangles[i + 1]]
+    const p2 = allPoints[delaunay.triangles[i + 2]]
+    if (isTriangleInsideHull(p0, p1, p2, outerHull))
+      triangles.push([p0, p1, p2])
+  }
+  return triangles
 }
 \end{lstlisting}
 
-\section{User Interface}
+\section{User interface}
 
-For the front end visualization, the application renders all of the geometry inside a single SVG element with a viewBox of 700$\times$600 pixels. The user interacts with the application through controls that are placed above the SVG canvas:
+Everything gets rendered on an HTML5 Canvas, the canvas is 781 by 781 pixels (71 cells times 11 pixel spacing). On the left side there is a panel with buttons for each step and the $k$ slider.
 
-\begin{itemize}
-    \item \textbf{Random} --- generate 28 random points and triangulate.
-    \item \textbf{Refine Step} --- run one refinement pass.
-    \item \textbf{Refine All} --- refine until no bad triangles remain.
-    \item \textbf{Reset} --- remove all refinement-added points.
-    \item \textbf{Circumcircles} --- toggle circumcircle overlay (dashed circles).
-    \item \textbf{Max Area / Min Angle sliders} --- adjust quality thresholds.
-    \item \textbf{Click on canvas} --- add a point manually.
-    \item \textbf{Click on triangle} --- select it and view its stats.
-\end{itemize}
-
-We use color to communicate triangle quality to the user each triangle in the SVG canvas is filled with a color that corresponds to whether it passed or failed the quality thresholds. This visualization helps makes it immediately obvious where the problem areas are in the mesh without having to click on individual triangles:
-\begin{itemize}
-    \item \textbf{Green} --- good (passes both thresholds)
-    \item \textbf{Orange} --- area too large
-    \item \textbf{Yellow} --- minimum angle too small
-    \item \textbf{Red} --- both problems
-    \item \textbf{Purple} --- currently selected
-\end{itemize}
-
-For the points we also use color to differentiate between the original random points and the ones that were inserted during refinement. The original points show up as dark circles and the refinement inserted points show up as purple circles. We thought this distinction was important because it lets us see how much work the refinement algorithm actually did compared to the starting point set. There is also a statistics bar at the bottom of the page that shows total points, how many were added by refinement, triangle count, bad triangle count, and the average minimum angle across the whole mesh.
+Original grid points are blue, inserted fill points are orange, outer boundary is red, hole boundaries are orange, and triangle edges are green.
 
 \section{Results}
 
-To test the application we generated a set of 28 random points scattered across the canvas. The initial Delaunay triangulation of these points contained a large number of bad triangles, shown in orange and yellow in Figure \ref{fig:web_before}. After clicking the ``Refine All'' button the refinement algorithm ran multiple passes and inserted additional points into the mesh until all the triangles passed both the area and minimum angle quality thresholds. The result after refinement is shown in Figure \ref{fig:web_after}, most of the triangles are green now which indicates they are within acceptable quality. Figure \ref{fig:web_circumcircles} shows the circumcircle overlay, the dashed blue circles represent each triangle's circumcircle and we can verify that no point falls inside another triangle's circumcircle which confirms that the Delaunay property is maintained.
-
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{web_before_refine.png}
-    \caption{Initial Delaunay triangulation of 28 random points. Orange and yellow triangles are ``bad'' (too large or too skinny).}
-    \label{fig:web_before}
+    \includegraphics[width=0.85\textwidth]{step1_holes.png}
+    \caption{Step 1: grid with user-placed holes. Blue dots are visible points, gaps are the holes.}
+    \label{fig:step1}
 \end{figure}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{web_after_refine.png}
-    \caption{After refinement. Purple dots are inserted points. Most triangles are now green (pass both quality thresholds).}
-    \label{fig:web_after}
+    \includegraphics[width=0.85\textwidth]{step2_boundary.png}
+    \caption{Step 2: outer boundary detected by the k-ring clockwise walk (red polygon).}
+    \label{fig:step2}
 \end{figure}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.85\textwidth]{web_circumcircles.png}
-    \caption{Circumcircle overlay enabled. Dashed blue circles show each triangle's circumscribed circle. No point falls inside another triangle's circumcircle, confirming the Delaunay property.}
-    \label{fig:web_circumcircles}
+    \includegraphics[width=0.85\textwidth]{step3_holes_detected.png}
+    \caption{Step 3: hole boundaries detected and drawn as orange polygons.}
+    \label{fig:step3}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{step4_filled.png}
+    \caption{Step 4: holes filled with new grid points (orange dots).}
+    \label{fig:step4}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{step5_triangulated.png}
+    \caption{Step 5: Delaunay triangulation over the complete point set. Green edges are the filtered triangles.}
+    \label{fig:step5}
 \end{figure}
 
 \end{document}

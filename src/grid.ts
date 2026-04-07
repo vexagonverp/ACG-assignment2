@@ -1,20 +1,20 @@
 /**
- * grid.ts — Grid setup and the five pipeline steps.
+ * grid.ts
  *
- *   Step 1: Grid display + hole creation  (UI in App.vue)
- *   Step 2: Outer boundary detection      (BoundaryExterior: k-ring clockwise walk)
- *   Step 3: Inner hole detection          (BoundaryHole: O(N) 4-neighbor check)
- *   Step 4: Fill hole regions             (insert exact empty cell positions)
- *   Step 5: Delaunay triangulation        (d3-delaunay + boundary filtering)
+ * Grid setup and the five pipeline steps for point cloud processing:
+ *
+ *   1. Grid display + hole creation  (UI in App.vue)
+ *   2. Outer boundary detection      (k-ring clockwise walk)
+ *   3. Inner hole detection           (4-neighbor check, O(N))
+ *   4. Fill hole regions              (insert empty cell positions)
+ *   5. Delaunay triangulation         (d3-delaunay, filtered by hull)
  */
 
 import type { Point, Hole } from './types'
 import { concaveHull, pointInPolygon, normalizeAngle, findTopLeft } from './geometry'
 import { Delaunay } from 'd3-delaunay'
 
-// ═══════════════════════════════════════════════════════════════
-// Grid configuration
-// ═══════════════════════════════════════════════════════════════
+// ── Grid configuration ─────────────────────────────────────
 
 export const CANVAS_GRID_SIZE = 70
 export const FILL_GRID_SIZE = 50
@@ -25,18 +25,21 @@ export const OFFSET = Math.floor((CANVAS_GRID_SIZE - FILL_GRID_SIZE) / 2)
 
 const CENTER = FILL_GRID_SIZE / 2
 
-/** Encodes a grid cell (x, y) into a unique string key for Set/Map lookups. */
+/** Turns (x, y) into a string like "12,7" for use as Set/Map keys. */
 function gridKey(x: number, y: number): string {
   return `${x},${y}`
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Outer boundary shape
-// ═══════════════════════════════════════════════════════════════
+// ── Outer boundary shape ───────────────────────────────────
+//
+// The outer boundary is an irregular blob defined by control radii at
+// evenly-spaced angles around the grid center. Each radius is randomly
+// scaled between BOUNDARY_MIN_SCALE and (MIN + RANDOM) of CENTER, so
+// the shape looks organic rather than circular.
 
 const BOUNDARY_CONTROL_POINTS = 16
-const BOUNDARY_MIN_SCALE = 0.7   // minimum radius as fraction of CENTER
-const BOUNDARY_RANDOM_SCALE = 0.3 // additional random radius fraction
+const BOUNDARY_MIN_SCALE = 0.7
+const BOUNDARY_RANDOM_SCALE = 0.3
 
 export function generateBoundaryRadii(): number[] {
   const radii: number[] = []
@@ -47,8 +50,9 @@ export function generateBoundaryRadii(): number[] {
 }
 
 /**
- * Interpolates radius at a given angle from evenly-spaced control radii.
- * Shared by both outer boundary and hole blob shapes.
+ * Given an angle, linearly interpolates between two adjacent control radii
+ * to get the boundary distance at that angle. Both the outer boundary and
+ * hole blobs use this same interpolation.
  */
 function interpolateRadius(angle: number, radii: number[]): number {
   let a = angle
@@ -61,6 +65,7 @@ function interpolateRadius(angle: number, radii: number[]): number {
   return radii[idx] * (1 - t) + radii[nextIdx] * t
 }
 
+/** True when (col, row) falls inside the outer boundary blob. */
 export function isInsideBoundary(col: number, row: number, radii: number[]): boolean {
   const dx = col - CENTER
   const dy = row - CENTER
@@ -68,15 +73,17 @@ export function isInsideBoundary(col: number, row: number, radii: number[]): boo
   return dist <= interpolateRadius(Math.atan2(dy, dx), radii)
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Hole creation (Step 1)
-// ═══════════════════════════════════════════════════════════════
+// ── Hole creation (Step 1) ─────────────────────────────────
+//
+// Holes are smaller blobs placed inside the boundary. Each hole has its
+// own random center, base radius, and per-angle radii, so the shapes
+// are irregular rather than circular.
 
 const MIN_HOLE_RADIUS = 2
-const MAX_HOLE_RADIUS_EXTRA = 3    // baseRadius ∈ [2, 5]
+const MAX_HOLE_RADIUS_EXTRA = 3
 const MIN_HOLE_CONTROL_POINTS = 8
-const MAX_HOLE_CONTROL_EXTRA = 5   // numPoints ∈ [8, 12]
-const HOLE_RADII_MIN_SCALE = 0.5   // per-point radius variation
+const MAX_HOLE_CONTROL_EXTRA = 5
+const HOLE_RADII_MIN_SCALE = 0.5
 const HOLE_RADII_RANDOM_SCALE = 0.8
 
 export function createHole(cx: number, cy: number): Hole {
@@ -89,6 +96,7 @@ export function createHole(cx: number, cy: number): Hole {
   return { cx, cy, radii, numPoints }
 }
 
+/** True when (col, row) falls inside any of the holes. */
 export function isInHole(col: number, row: number, holes: Hole[]): boolean {
   for (const hole of holes) {
     const dx = col - hole.cx
@@ -99,10 +107,9 @@ export function isInHole(col: number, row: number, holes: Hole[]): boolean {
   return false
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Visible points
-// ═══════════════════════════════════════════════════════════════
+// ── Visible points ─────────────────────────────────────────
 
+/** Collects all grid cells that are inside the boundary but not inside any hole. */
 export function getVisiblePoints(
   boundaryRadii: number[],
   holes: Hole[]
@@ -120,11 +127,9 @@ export function getVisiblePoints(
   return pts
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Shared helper
-// ═══════════════════════════════════════════════════════════════
+// ── Shared helper ──────────────────────────────────────────
 
-/** True if any of the 4 cardinal neighbors of (x,y) is not in the occupied set. */
+/** True when at least one of the 4 cardinal neighbors of (x,y) is missing from the set. */
 function hasEmpty4Neighbor(x: number, y: number, occupied: Set<string>): boolean {
   return !occupied.has(gridKey(x, y - 1)) ||
          !occupied.has(gridKey(x + 1, y)) ||
@@ -132,28 +137,22 @@ function hasEmpty4Neighbor(x: number, y: number, occupied: Set<string>): boolean
          !occupied.has(gridKey(x - 1, y))
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Step 2: BoundaryExterior (k-ring clockwise walk)
-// ═══════════════════════════════════════════════════════════════
+// ── Step 2: outer boundary detection (k-ring clockwise walk) ──
 //
-// Algorithm:
-//   1. Find pFirst = topmost-leftmost occupied cell
-//   2. Grow clockwise:
-//      - Enumerate RNk(p) clockwise starting from direction (p → pPrev)
-//      - For each candidate q, check intermediate points qi on segment
-//        (p, q) at each ring distance i = 1..k
-//      - If qi is occupied AND any 4-neighbor of qi is empty → pNext = qi
-//   3. Stop when p returns to pFirst
-//   4. Falls back to concave hull if the walk doesn't close
+// Starting from the top-left occupied cell, the algorithm walks clockwise
+// along cells that sit on the edge (have at least one empty 4-neighbor).
+// At each step it checks rings of distance 1..k around the current cell,
+// preferring closer rings so the walk stays tight. It only jumps to a
+// larger ring when no unvisited boundary cell exists at the current one.
 //
-// k controls smoothness: higher k = smoother, may skip small features.
+// Higher k produces smoother boundaries but may skip small features.
+// If the walk fails to close, it falls back to concave hull.
 
 export function detectOuterBoundary(points: Point[], k: number): Point[] {
   if (points.length < 3) return points
 
   const occupied = new Set(points.map(p => gridKey(p[0], p[1])))
 
-  // 1. Find topmost-leftmost occupied cell
   const { point: start } = findTopLeft(points)
 
   const boundary: Point[] = [start]
@@ -161,15 +160,10 @@ export function detectOuterBoundary(points: Point[], k: number): Point[] {
 
   let currentX = start[0], currentY = start[1]
 
-  // Initial direction (current → previous): pretend we came from the west
+  // Pretend we arrived from the west so the first scan goes clockwise
   let backAngle = Math.PI
 
   for (let iter = 0; iter < points.length * 2; iter++) {
-    // Try each ring distance 1, 2, ..., k in order.
-    // At each distance, sort boundary-eligible cells CW from backAngle.
-    // Only move to a larger ring if no unvisited candidates at the current ring.
-    // This ensures the walk follows the boundary tightly at distance 1,
-    // and only "jumps" to distance 2+ to cross gaps (smoother boundary).
     let nextPoint: Point | null = null
 
     for (let ring = 1; ring <= k && !nextPoint; ring++) {
@@ -212,24 +206,21 @@ export function detectOuterBoundary(points: Point[], k: number): Point[] {
     visited.add(gridKey(currentX, currentY))
   }
 
-  // Fallback: if walk didn't close, use concave hull
   if (boundary.length < 3) return concaveHull(points, k)
   return boundary
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Step 3: BoundaryHole (O(N) 4-neighbor check)
-// ═══════════════════════════════════════════════════════════════
+// ── Step 3: hole boundary detection ────────────────────────
 //
-// Algorithm:
-//   1. Mark all exterior boundary points from Step 2
-//   2. For every occupied cell pi:
-//      - If NOT an exterior boundary point
-//      - AND at least one 4-neighbor is empty
-//      → pi is a hole boundary point
-//   3. Cluster hole boundary points by 8-connectivity → one group per hole
-//   4. For each group, collect adjacent empty cells (for fill step)
-//   5. Compute concave hull of each group (for visualization)
+// To find hole boundaries we first need to distinguish "exterior" empty
+// cells (outside the point cloud) from "interior" ones (inside a hole).
+// A flood-fill from the grid edges marks all exterior empties; any empty
+// cell not reached by that fill must be inside a hole.
+//
+// From there, any occupied cell that has a non-exterior empty neighbor
+// is on a hole boundary. Those boundary cells get grouped by
+// 8-connectivity into per-hole clusters, and each cluster gets a
+// concave hull for visualization.
 
 const NEIGHBORS_8: [number, number][] = [
   [1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]
@@ -237,16 +228,15 @@ const NEIGHBORS_8: [number, number][] = [
 const NEIGHBORS_4: [number, number][] = [[1,0],[-1,0],[0,1],[0,-1]]
 
 /**
- * Flood-fills from the grid edges inward to find all empty cells that
- * belong to the exterior (outside the point cloud). Any empty cell NOT
- * in this set must be inside a hole.
+ * Flood-fills from the grid edges inward through empty cells.
+ * Everything reached is "exterior"; unreached empties are inside holes.
  */
 function findExteriorEmptyCells(occupied: Set<string>): Set<string> {
   const exterior = new Set<string>()
   const stack: Point[] = []
   const minB = OFFSET, maxB = OFFSET + FILL_GRID_SIZE - 1
 
-  // Seed: all empty cells on the 4 grid edges
+  // Seed with empty cells on the four grid edges
   for (let x = minB; x <= maxB; x++) {
     for (const y of [minB, maxB]) {
       const key = gridKey(x, y)
@@ -278,9 +268,8 @@ function findExteriorEmptyCells(occupied: Set<string>): Set<string> {
 }
 
 /**
- * Finds all interior points that border an empty hole cell.
- * A point qualifies if at least one of its 4-neighbors is an empty cell
- * that is NOT part of the exterior (i.e. it's inside a hole).
+ * An occupied cell is a hole boundary cell when at least one of its
+ * 4-neighbors is empty and that empty cell is not part of the exterior.
  */
 function findHoleBoundaryPoints(
   visiblePoints: Point[],
@@ -292,7 +281,6 @@ function findHoleBoundaryPoints(
 
   for (const pt of visiblePoints) {
     const key = gridKey(pt[0], pt[1])
-    // Check if any 4-neighbor is empty AND not exterior → borders a hole
     let bordersHole = false
     for (const [dx, dy] of NEIGHBORS_4) {
       const neighborKey = gridKey(pt[0] + dx, pt[1] + dy)
@@ -310,10 +298,7 @@ function findHoleBoundaryPoints(
   return { points, keys }
 }
 
-/**
- * Groups hole boundary points into clusters using 8-connectivity BFS.
- * Each cluster corresponds to one distinct hole in the point cloud.
- */
+/** Groups hole boundary cells into clusters via 8-connectivity BFS. */
 function clusterByConnectivity(
   holeBoundaryPoints: Point[],
   holeBoundaryKeys: Set<string>
@@ -350,10 +335,9 @@ function clusterByConnectivity(
 }
 
 /**
- * Flood-fills all empty cells reachable from a hole boundary cluster,
- * excluding any cell that belongs to the exterior.
- * Seeds from empty 8-neighbors of boundary points, then expands
- * through 4-connected empty cells to capture the full hole interior.
+ * Starting from the 8-neighbors of a boundary cluster, flood-fills
+ * through 4-connected empty cells that are not part of the exterior.
+ * This captures the full interior of one hole.
  */
 function floodFillEmptyRegion(
   cluster: Point[],
@@ -367,7 +351,7 @@ function floodFillEmptyRegion(
   const emptyPoints: Point[] = []
   const stack: Point[] = []
 
-  // Seed: empty non-exterior cells adjacent (8-connected) to boundary points
+  // Seed from empty non-exterior 8-neighbors of the boundary cluster
   for (const boundaryPoint of cluster) {
     for (const [dx, dy] of NEIGHBORS_8) {
       const neighborX = boundaryPoint[0] + dx, neighborY = boundaryPoint[1] + dy
@@ -381,7 +365,7 @@ function floodFillEmptyRegion(
     }
   }
 
-  // Expand: flood-fill through 4-connected non-exterior empty cells
+  // Expand through 4-connected non-exterior empties
   while (stack.length > 0) {
     const [emptyX, emptyY] = stack.pop()!
     emptyPoints.push([emptyX, emptyY])
@@ -400,22 +384,21 @@ function floodFillEmptyRegion(
   return emptyPoints
 }
 
+/**
+ * Runs the full hole detection pipeline: flood-fill exterior, find
+ * boundary cells, cluster them, then flood-fill each hole interior
+ * and compute a concave hull per cluster.
+ */
 export function detectHoleBoundaries(
   visiblePoints: Point[],
   k: number
 ): { hulls: Point[][]; emptyRegions: Point[][] } {
   const occupied = new Set(visiblePoints.map(p => gridKey(p[0], p[1])))
 
-  // 1. Flood-fill from grid edges to identify all exterior empty cells
   const exteriorEmpty = findExteriorEmptyCells(occupied)
-
-  // 2. Find interior points that border a non-exterior empty cell — O(N)
   const holeBoundary = findHoleBoundaryPoints(visiblePoints, occupied, exteriorEmpty)
-
-  // 3. Group boundary points into per-hole clusters by 8-connectivity
   const clusters = clusterByConnectivity(holeBoundary.points, holeBoundary.keys)
 
-  // 4. For each cluster, flood-fill its empty interior and compute a hull
   const hulls: Point[][] = []
   const emptyRegions: Point[][] = []
 
@@ -432,10 +415,9 @@ export function detectHoleBoundaries(
   return { hulls, emptyRegions }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Step 4: Fill hole regions
-// ═══════════════════════════════════════════════════════════════
+// ── Step 4: fill hole regions ──────────────────────────────
 
+/** Returns new points that fill in the empty cells of each hole region, skipping duplicates. */
 export function fillHolePoints(
   emptyRegions: Point[][],
   existingPoints: Point[]
@@ -455,10 +437,14 @@ export function fillHolePoints(
   return newPoints
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Step 5: Delaunay triangulation
-// ═══════════════════════════════════════════════════════════════
+// ── Step 5: Delaunay triangulation ─────────────────────────
 
+/**
+ * Runs Delaunay triangulation on all points, then filters out any triangle
+ * whose centroid or edge midpoints fall outside the outer hull. Without
+ * this filter, d3-delaunay would produce long thin triangles that span
+ * across concavities.
+ */
 export function triangulatePoints(
   allPoints: Point[],
   outerHull: Point[]
@@ -487,14 +473,16 @@ export function triangulatePoints(
   return triangles
 }
 
+/**
+ * Samples the centroid and three edge midpoints; if all four are inside
+ * the hull polygon, the triangle is considered interior.
+ */
 function isTriangleInsideHull(
   p0: Point, p1: Point, p2: Point,
   hull: Point[]
 ): boolean {
   if (hull.length < 3) return true
 
-  // Sample the centroid and 3 edge midpoints — if all are inside the hull,
-  // the triangle is considered interior (filters out triangles spanning outside)
   const centroid: Point = [(p0[0] + p1[0] + p2[0]) / 3, (p0[1] + p1[1] + p2[1]) / 3]
   const midEdge01: Point = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2]
   const midEdge12: Point = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2]

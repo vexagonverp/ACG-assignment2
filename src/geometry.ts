@@ -1,41 +1,46 @@
 /**
- * geometry.ts — Computational geometry functions.
+ * geometry.ts
  *
- * Uses d3-polygon for standard operations (point-in-polygon, convex hull)
- * and implements concave hull (Moreira & Santos 2007) from scratch since
- * no standard library provides it.
+ * Geometry primitives and the concave hull algorithm (Moreira & Santos 2007).
+ * Standard operations like point-in-polygon and convex hull are delegated to
+ * d3-polygon, while the concave hull is implemented here since no library
+ * provides one.
  */
 
 import type { Point } from './types'
 import { polygonContains, polygonHull } from 'd3-polygon'
 
-// ── Primitives (internal) ───────────────────────────────────
+// ── Primitives ─────────────────────────────────────────────
 
+/** Squared distance between two points (avoids sqrt when only comparing). */
 function dist2(a: Point, b: Point): number {
   return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
 }
 
+/** Euclidean distance. */
 function ptDist(a: Point, b: Point): number {
   return Math.sqrt(dist2(a, b))
 }
 
+/** Angle from a to b in radians. */
 function ptAngle(a: Point, b: Point): number {
   return Math.atan2(b[1] - a[1], b[0] - a[0])
 }
 
+/** 2D cross product of vectors (o->a) and (o->b). Positive when b is left of o->a. */
 function cross(o: Point, a: Point, b: Point): number {
   return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 }
 
-/** Wraps an angle into the range [0, 2π). */
+/** Wraps an angle into [0, 2pi). */
 export function normalizeAngle(angle: number): number {
   const TWO_PI = Math.PI * 2
   return ((angle % TWO_PI) + TWO_PI) % TWO_PI
 }
 
 /**
- * Finds the topmost-leftmost point (smallest y, then smallest x).
- * Returns { point, index } so callers can use either.
+ * Scans through points and returns the one with the smallest y coordinate.
+ * When two points share the same y, the one further left (smaller x) wins.
  */
 export function findTopLeft(points: Point[]): { point: Point; index: number } {
   let bestIndex = 0
@@ -50,8 +55,8 @@ export function findTopLeft(points: Point[]): { point: Point; index: number } {
 }
 
 /**
- * Finds the bottommost-leftmost point (largest y, then smallest x).
- * Returns { point, index } so callers can use either.
+ * Same idea as findTopLeft but picks the largest y instead, so the
+ * bottommost-leftmost point. The concave hull walk starts from here.
  */
 export function findBottomLeft(points: Point[]): { point: Point; index: number } {
   let bestIndex = 0
@@ -65,8 +70,9 @@ export function findBottomLeft(points: Point[]): { point: Point; index: number }
   return { point: points[bestIndex], index: bestIndex }
 }
 
-// ── Segment intersection (internal) ─────────────────────────
+// ── Segment intersection ───────────────────────────────────
 
+/** True when segments (p1,p2) and (p3,p4) cross. Shared endpoints don't count. */
 function segmentsIntersect(p1: Point, p2: Point, p3: Point, p4: Point): boolean {
   if ((p1[0] === p3[0] && p1[1] === p3[1]) ||
       (p1[0] === p4[0] && p1[1] === p4[1]) ||
@@ -82,23 +88,26 @@ function segmentsIntersect(p1: Point, p2: Point, p3: Point, p4: Point): boolean 
          ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
 }
 
-// ── Point-in-polygon (d3-polygon) ───────────────────────────
+// ── Wrappers around d3-polygon ─────────────────────────────
 
-/** Delegates to d3-polygon's polygonContains (ray-casting). */
+/** Ray-casting point-in-polygon via d3. */
 export function pointInPolygon(pt: Point, polygon: Point[]): boolean {
   return polygonContains(polygon, pt)
 }
 
-// ── Convex hull (d3-polygon) ────────────────────────────────
-
-/** Delegates to d3-polygon's polygonHull (Andrew's monotone chain). */
+/** Convex hull via d3 (Andrew's monotone chain). */
 function convexHull(points: Point[]): Point[] {
   const hull = polygonHull(points)
   return hull ? [...hull] : points
 }
 
-// ── k-NN index (internal) ───────────────────────────────────
+// ── k-NN index ─────────────────────────────────────────────
 
+/**
+ * For each point, precomputes a sorted list of all other points by distance.
+ * The concave hull algorithm needs fast k-nearest-neighbor lookups at every
+ * step, so building this index up front avoids repeated sorting.
+ */
 function buildKnnIndex(points: Point[]): number[][] {
   const n = points.length
   const index: number[][] = new Array(n)
@@ -115,12 +124,13 @@ function buildKnnIndex(points: Point[]): number[][] {
 }
 
 // ── Concave hull (Moreira & Santos 2007) ────────────────────
+//
+// The algorithm walks clockwise from the bottommost point. At each step
+// it looks at the k nearest neighbors and picks the one that turns the
+// least (i.e. continues most clockwise) without crossing an existing
+// hull edge. If the walk returns to the start, we have a hull.
 
-/**
- * Attempts to build a concave hull with a specific k value.
- * Walks clockwise from the bottommost point, picking the best
- * candidate among k nearest neighbors at each step.
- */
+/** Single attempt at building a concave hull with a given k. */
 function tryHull(
   points: Point[],
   knnIndex: number[][],
@@ -166,19 +176,19 @@ function tryHull(
     if (!found) return null
   }
 
-  return null // Loop exhausted without closing
+  return null
 }
 
-/** Returns true if the closing edge (from → start) doesn't cross any existing hull edge. */
+/** Check that closing the loop (from -> start) won't cross existing edges. */
 function canCloseLoop(hull: Point[], from: Point, start: Point): boolean {
   for (let i = 0; i < hull.length - 1; i++) {
-    if (i === hull.length - 2) continue // skip the edge adjacent to 'from'
+    if (i === hull.length - 2) continue
     if (segmentsIntersect(from, start, hull[i], hull[i + 1])) return false
   }
   return true
 }
 
-/** Returns true if extending the hull from `from` to `nextPoint` doesn't cross any existing hull edge. */
+/** Check that extending (from -> nextPoint) won't cross existing edges. */
 function canExtendTo(hull: Point[], from: Point, nextPoint: Point): boolean {
   for (let i = 0; i < hull.length - 1; i++) {
     if (segmentsIntersect(from, nextPoint, hull[i], hull[i + 1])) return false
@@ -186,11 +196,14 @@ function canExtendTo(hull: Point[], from: Point, nextPoint: Point): boolean {
   return true
 }
 
-/** Validates: no self-intersections, all points inside or on the hull. */
+/**
+ * Validates a hull by checking two things: no edges cross each other,
+ * and every input point falls inside or on the boundary (within a small
+ * tolerance to handle floating-point edge cases).
+ */
 function validateHull(hull: Point[], points: Point[]): boolean {
   if (hull.length < 3) return false
 
-  // Self-intersection check
   for (let i = 0; i < hull.length; i++) {
     const a = hull[i]
     const b = hull[(i + 1) % hull.length]
@@ -200,7 +213,6 @@ function validateHull(hull: Point[], points: Point[]): boolean {
     }
   }
 
-  // All-points-contained check
   const TOLERANCE = 0.5
   for (const pt of points) {
     if (pointInPolygon(pt, hull)) continue
@@ -224,8 +236,8 @@ function validateHull(hull: Point[], points: Point[]): boolean {
 }
 
 /**
- * Computes a concave hull using k-nearest neighbors (Moreira & Santos 2007).
- * Tries increasing k values; falls back to d3-polygon's convex hull.
+ * Tries concave hull with increasing k (from kStart up to 8). If none of
+ * the attempts produce a valid hull, falls back to d3's convex hull.
  */
 export function concaveHull(points: Point[], kStart: number): Point[] {
   if (points.length < 3) return points
