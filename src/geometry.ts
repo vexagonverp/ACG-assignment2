@@ -27,6 +27,44 @@ function cross(o: Point, a: Point, b: Point): number {
   return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 }
 
+/** Wraps an angle into the range [0, 2π). */
+export function normalizeAngle(angle: number): number {
+  const TWO_PI = Math.PI * 2
+  return ((angle % TWO_PI) + TWO_PI) % TWO_PI
+}
+
+/**
+ * Finds the topmost-leftmost point (smallest y, then smallest x).
+ * Returns { point, index } so callers can use either.
+ */
+export function findTopLeft(points: Point[]): { point: Point; index: number } {
+  let bestIndex = 0
+  for (let i = 1; i < points.length; i++) {
+    const [x, y] = points[i]
+    const [bestX, bestY] = points[bestIndex]
+    if (y < bestY || (y === bestY && x < bestX)) {
+      bestIndex = i
+    }
+  }
+  return { point: points[bestIndex], index: bestIndex }
+}
+
+/**
+ * Finds the bottommost-leftmost point (largest y, then smallest x).
+ * Returns { point, index } so callers can use either.
+ */
+export function findBottomLeft(points: Point[]): { point: Point; index: number } {
+  let bestIndex = 0
+  for (let i = 1; i < points.length; i++) {
+    const [x, y] = points[i]
+    const [bestX, bestY] = points[bestIndex]
+    if (y > bestY || (y === bestY && x < bestX)) {
+      bestIndex = i
+    }
+  }
+  return { point: points[bestIndex], index: bestIndex }
+}
+
 // ── Segment intersection (internal) ─────────────────────────
 
 function segmentsIntersect(p1: Point, p2: Point, p3: Point, p4: Point): boolean {
@@ -100,9 +138,7 @@ function tryHull(
     const candidates = neighbors
       .map(neighborIdx => {
         const angle = ptAngle(points[currentIdx], points[neighborIdx])
-        let turn = prevAngle - angle
-        while (turn < 0) turn += Math.PI * 2
-        while (turn >= Math.PI * 2) turn -= Math.PI * 2
+        const turn = normalizeAngle(prevAngle - angle)
         return { idx: neighborIdx, angle, turn }
       })
       .sort((a, b) => a.turn - b.turn)
@@ -196,14 +232,7 @@ export function concaveHull(points: Point[], kStart: number): Point[] {
 
   const knnIndex = buildKnnIndex(points)
 
-  // Start from the bottommost point (highest y), then leftmost
-  let startIdx = 0
-  for (let i = 1; i < points.length; i++) {
-    if (points[i][1] > points[startIdx][1] ||
-        (points[i][1] === points[startIdx][1] && points[i][0] < points[startIdx][0])) {
-      startIdx = i
-    }
-  }
+  const { index: startIdx } = findBottomLeft(points)
 
   for (let k = Math.max(kStart, 4); k <= Math.min(points.length - 1, 8); k++) {
     const hull = tryHull(points, knnIndex, startIdx, k)

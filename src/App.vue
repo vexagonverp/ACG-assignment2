@@ -22,7 +22,7 @@ import GridCanvas from './components/GridCanvas.vue'
 
 const step = ref(1)
 const holes = ref<Hole[]>([])
-const kValue = ref(1)
+const kValue = ref(3)
 const boundaryRadii = ref<number[]>([])
 
 const outerHull = ref<Point[]>([])

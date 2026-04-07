@@ -9,7 +9,7 @@
  */
 
 import type { Point, Hole } from './types'
-import { concaveHull, pointInPolygon } from './geometry'
+import { concaveHull, pointInPolygon, normalizeAngle, findTopLeft } from './geometry'
 import { Delaunay } from 'd3-delaunay'
 
 // ═══════════════════════════════════════════════════════════════
@@ -154,12 +154,7 @@ export function detectOuterBoundary(points: Point[], k: number): Point[] {
   const occupied = new Set(points.map(p => gridKey(p[0], p[1])))
 
   // 1. Find topmost-leftmost occupied cell
-  let start = points[0]
-  for (const p of points) {
-    if (p[1] < start[1] || (p[1] === start[1] && p[0] < start[0])) {
-      start = p
-    }
-  }
+  const { point: start } = findTopLeft(points)
 
   const boundary: Point[] = [start]
   const visited = new Set([gridKey(start[0], start[1])])
@@ -189,9 +184,7 @@ export function detectOuterBoundary(points: Point[], k: number): Point[] {
           if (!hasEmpty4Neighbor(neighborX, neighborY, occupied)) continue
 
           const angle = Math.atan2(dy, dx)
-          let turn = angle - backAngle
-          while (turn < 0) turn += Math.PI * 2
-          while (turn >= Math.PI * 2) turn -= Math.PI * 2
+          const turn = normalizeAngle(angle - backAngle)
 
           candidates.push({ x: neighborX, y: neighborY, turn })
         }
