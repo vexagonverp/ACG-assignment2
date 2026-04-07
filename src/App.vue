@@ -79,7 +79,7 @@ function onDetectBoundary() {
 // ── Step 3: Detect holes ────────────────────────────────────
 
 function onDetectHoles() {
-  const result = detectHoleBoundaries(visiblePoints.value, outerHull.value, kValue.value)
+  const result = detectHoleBoundaries(visiblePoints.value, kValue.value)
   holeHulls.value = result.hulls
   emptyRegions.value = result.emptyRegions
   step.value = 3

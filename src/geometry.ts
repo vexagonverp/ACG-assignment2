@@ -98,56 +98,56 @@ function tryHull(
     const neighbors = knnIndex[currentIdx].slice(0, k)
 
     const candidates = neighbors
-      .map(nIdx => {
-        const a = ptAngle(points[currentIdx], points[nIdx])
-        let turn = prevAngle - a
+      .map(neighborIdx => {
+        const angle = ptAngle(points[currentIdx], points[neighborIdx])
+        let turn = prevAngle - angle
         while (turn < 0) turn += Math.PI * 2
         while (turn >= Math.PI * 2) turn -= Math.PI * 2
-        return { idx: nIdx, angle: a, turn }
+        return { idx: neighborIdx, angle, turn }
       })
       .sort((a, b) => a.turn - b.turn)
 
     let found = false
     for (const cand of candidates) {
-      // Try to close the loop
       if (cand.idx === startIdx && hull.length >= 3) {
-        let closingOk = true
-        for (let i = 0; i < hull.length - 1; i++) {
-          if (i === hull.length - 2) continue
-          if (segmentsIntersect(points[currentIdx], points[startIdx], hull[i], hull[i + 1])) {
-            closingOk = false
-            break
-          }
-        }
-        if (closingOk) return hull
+        if (canCloseLoop(hull, points[currentIdx], points[startIdx])) return hull
         continue
       }
 
       if (used.has(cand.idx)) continue
 
-      // Check new edge doesn't cross existing hull edges
-      const newPt = points[cand.idx]
-      let intersects = false
-      for (let i = 0; i < hull.length - 1; i++) {
-        if (segmentsIntersect(points[currentIdx], newPt, hull[i], hull[i + 1])) {
-          intersects = true
-          break
-        }
+      const nextPoint = points[cand.idx]
+      if (canExtendTo(hull, points[currentIdx], nextPoint)) {
+        hull.push(nextPoint)
+        used.add(cand.idx)
+        prevAngle = ptAngle(nextPoint, points[currentIdx])
+        currentIdx = cand.idx
+        found = true
+        break
       }
-      if (intersects) continue
-
-      hull.push(newPt)
-      used.add(cand.idx)
-      prevAngle = ptAngle(newPt, points[currentIdx])
-      currentIdx = cand.idx
-      found = true
-      break
     }
 
     if (!found) return null
   }
 
   return null // Loop exhausted without closing
+}
+
+/** Returns true if the closing edge (from → start) doesn't cross any existing hull edge. */
+function canCloseLoop(hull: Point[], from: Point, start: Point): boolean {
+  for (let i = 0; i < hull.length - 1; i++) {
+    if (i === hull.length - 2) continue // skip the edge adjacent to 'from'
+    if (segmentsIntersect(from, start, hull[i], hull[i + 1])) return false
+  }
+  return true
+}
+
+/** Returns true if extending the hull from `from` to `nextPoint` doesn't cross any existing hull edge. */
+function canExtendTo(hull: Point[], from: Point, nextPoint: Point): boolean {
+  for (let i = 0; i < hull.length - 1; i++) {
+    if (segmentsIntersect(from, nextPoint, hull[i], hull[i + 1])) return false
+  }
+  return true
 }
 
 /** Validates: no self-intersections, all points inside or on the hull. */
