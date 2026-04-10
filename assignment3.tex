@@ -1,0 +1,118 @@
+\documentclass[12pt]{extreport}
+\usepackage[utf8]{inputenc}
+
+% --- 1. FONTS & FORMATTING ---
+\usepackage{mathptmx}  % Times New Roman
+\usepackage[T1]{fontenc}
+\usepackage{scrextend}
+\changefontsizes{13pt}
+
+% --- 2. MARGINS ---
+\usepackage[left=2.5cm, top=2.0cm, right=1.5cm, bottom=2.5cm]{geometry}
+
+% --- 3. SPACING ---
+\usepackage{setspace}
+\onehalfspacing
+
+% --- 4. PACKAGES ---
+\usepackage{graphicx}
+\usepackage{titlesec}
+\usepackage{indentfirst}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{amsmath}
+
+% --- 5. HEADING FORMAT ---
+\titleformat{\chapter}[display]
+  {\normalfont\bfseries\centering}
+  {\MakeUppercase{\chaptertitlename}\ \thechapter}
+  {0pt}
+  {\MakeUppercase}
+\titlespacing*{\chapter}{0pt}{-20pt}{24pt}
+
+\begin{document}
+
+% --- TITLE PAGE ---
+\begin{titlepage}
+    \centering
+    \vspace*{1cm}
+    \textbf{VIETNAM NATIONAL UNIVERSITY -- HO CHI MINH CITY}\\
+    \textbf{INTERNATIONAL UNIVERSITY}\\
+    \textbf{SCHOOL OF COMPUTER SCIENCE AND ENGINEERING}
+
+    \vspace{3cm}
+    \textbf{ADVANCED COMPUTER GRAPHIC}\\
+    \textbf{ASSIGNMENT 3}
+
+    \vspace{4cm}
+    \textbf{PAPER REVIEW REPORT}
+
+    \vspace{3cm}
+    \begin{flushleft}
+    \hspace{4cm} Student: Tran Bao Thanh, MITIU25214 \\
+    \end{flushleft}
+
+    \vfill
+    April 2026
+\end{titlepage}
+
+% --- TABLE OF CONTENTS ---
+\pagenumbering{roman}
+\setcounter{page}{2}
+\tableofcontents
+\newpage
+
+% ===========================================================================
+\pagenumbering{arabic}
+\chapter{REVIEW OF TWO PAPERS ON DEEP LEARNING FOR MEDICAL IMAGE PROCESSING}
+% ===========================================================================
+
+\section{Introduction}
+
+Deep learning has been used in medical imaging long enough that it is easy to forget how much the methods have changed over the years. Abut et al. \cite{paper2023} explains why the field moved away from classical neural networks toward convolutional ones. Phung et al. \cite{paper2022} work on a specific problem which is brain tumor segmentation from MRI scans using a GAN-based model.
+
+\section{Summary of Paper 1: GAN-based brain tumor segmentation}
+
+Phung et al. \cite{paper2022} build a 3D multi-scale GAN for brain tumor segmentation and test it on the BraTS 2021 dataset.
+
+The generator is a 3D encoder-decoder network very similar structure to ResU-Net, each encoder block does 3D convolution, instance normalization, and LeakyReLU with a dropout layer to reduce overfitting. The decoder have a similar approach while also uses skip connections to pull back spatial detail that pooling discards. Finally there is a multi-scale bridge that collects intermediate decoder outputs at different resolutions and merges them with 1$\times$1$\times$1 convolutions. The discriminator reuses the same encoder structure and outputs a single binary value: real or generated.
+
+A very real problem in GAN training is deciding how often to update the discriminator relative to the generator. Too many discriminator updates and it becomes too accurate for the generator to get useful feedback while too few and it cannot guide the generator at all. The authors address this by tracking the linear regression slope of the adversarial loss over recent iterations. When the slope rises which means the discriminator is pulling ahead and the generator needs more updates. When the slope falls which means the discriminator needs more training instead. This method significantly reduce the need for manual tunning.
+
+Training uses Dice loss on the segmentation output and mean squared error on the discriminator's prediction. Dice loss measures region overlap the more the predicted mask overlaps the ground truth, the lower the loss. On the BraTS 2021 validation set, the model scores 88.6\% on whole tumor and 82.3\% on enhancing tumor Dice.
+
+\section{Summary of Paper 2: From ANNs to DCNNs in medical imaging}
+
+Abut et al. \cite{paper2023} survey the transition from Artificial Neural Networks (ANNs) to Deep Convolutional Neural Networks (DCNNs) in medical image analysis, covering the literature from the 1970s up to recent work on CT and MRI.
+
+With ANNs feature extraction happens before the network sees any data because engineers compute edge maps, texture statistics, frequency transforms, or similar representations and pass those in. The choice of features differs for each unique problem and requires very specific domain knowledge. DCNNs do not need this step because convolutional layers learn to detect useful patterns during training.
+
+The paper also explains how convolution works at the operation level. Firstly a kernel matrix slides over the image and computes a weighted sum at each position to produce a feature map, then it goes through the standard DCNN components: convolution, ReLU activation, pooling, and fully connected layers at the end. The paper also notes on the ANN side that full connectivity across all inputs creates a large number of parameters which can causes overfitting when training data is limited. DCNNs reduce this by sharing weights across spatial positions and only connecting each neuron to a local region.
+
+The review closes by comparing results from ANN-based and DCNN-based studies on CT, MRI, X-ray, and ultrasound data and concludes that DCNNs are now the standard approach because they skip the manual feature engineering step entirely.
+
+\section{Relationship between the two papers}
+
+Abut et al. \cite{paper2023} do not cover GANs. The survey stops at DCNNs used for classification and detection, so the discriminator in Phung et al. \cite{paper2022} is outside its scope entirely. The GANs itself is still a DCNN at its core, but the adversarial training part does not appear in the review at all.
+
+The two papers also work at very different scales while the Abut goes through 50 years of literature across four imaging modalities, Phung only use one dataset with one architecture and four numbers to report. Both papers in essence are different however they could be view as complementary to each other.
+
+\section{Conclusion}
+
+Abut et al. \cite{paper2023} make it easier to understand why the architecture in Phung et al. \cite{paper2022} is built the way it is. The review explains convolutional feature learning and skip connections which are both central to how the GAN model works because without that background reading Phung et al. \cite{paper2022} means a lot of assumed knowledge.
+
+\begin{thebibliography}{9}
+\bibitem{paper2022}
+Phung, L.K., Nguyen, S.V., Le, T.D., and Maleszka, M. (2022).
+A research for segmentation of brain tumors based on GAN model.
+\url{https://doi.org/10.1007/978-3-031-21967-2_30}
+
+\bibitem{paper2023}
+Abut, S., Okut, H., and Kallail, K.J. (2024).
+Paradigm shift from artificial neural networks (ANNs) to deep convolutional neural networks (DCNNs) in the field of medical image processing.
+\url{https://doi.org/10.1016/j.eswa.2023.122983}
+\end{thebibliography}
+
+\end{document}
